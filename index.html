@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>素材切り出しツール -切りヌくん-</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: "MS PGothic", "MS Pゴシック", "Yu Gothic", sans-serif;
+    font-size: 12px;
+    background: #008080;
+    overflow: hidden;
+    user-select: none;
+  }
+  .win {
+    position: absolute; inset: 8px;
+    background: #c0c0c0;
+    border: 2px solid;
+    border-color: #dfdfdf #000 #000 #dfdfdf;
+    box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #808080;
+    display: flex; flex-direction: column;
+  }
+  .titlebar {
+    height: 22px; margin: 3px;
+    background: linear-gradient(90deg, #000080, #1084d0);
+    color: #fff; font-weight: bold;
+    display: flex; align-items: center; gap: 6px;
+    padding: 0 6px; flex: none;
+  }
+  .titlebar .ticon { width: 14px; height: 14px; background: #c0c0c0; border: 1px solid #fff; display:inline-flex; align-items:center; justify-content:center; color:#000; font-size:10px; }
+  .toolbar {
+    flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+    padding: 3px 5px; border-bottom: 1px solid #808080; box-shadow: 0 1px 0 #fff;
+  }
+  .btn95 {
+    background: #c0c0c0; border: 2px solid;
+    border-color: #fff #404040 #404040 #fff;
+    box-shadow: 1px 1px 0 #000;
+    padding: 2px 8px; font-family: inherit; font-size: 12px; cursor: pointer;
+    min-height: 22px;
+  }
+  .btn95:active, .btn95.on {
+    border-color: #404040 #fff #fff #404040;
+    box-shadow: none;
+    background: #b8b8b8;
+  }
+  .btn95:disabled { color: #808080; text-shadow: 1px 1px 0 #fff; cursor: default; }
+  select, input[type="number"], input[type="text"] {
+    font-family: inherit; font-size: 12px;
+    border: 2px solid; border-color: #404040 #fff #fff #404040;
+    background: #fff; padding: 1px 2px; min-height: 20px;
+  }
+  input[type="number"] { width: 52px; }
+  .sep { width: 2px; align-self: stretch; margin: 1px 2px; border-left: 1px solid #808080; border-right: 1px solid #fff; }
+  .main { flex: 1; display: flex; min-height: 0; }
+  /* left: file list */
+  .filepane {
+    width: 168px; flex: none; display: flex; flex-direction: column;
+    border-right: 1px solid #808080; box-shadow: 1px 0 0 #fff;
+    padding: 4px;
+  }
+  .pane-title { font-weight: bold; margin: 2px 0 4px 2px; }
+  .filelist {
+    flex: 1; overflow-y: auto;
+    background: #fff; border: 2px solid; border-color: #404040 #fff #fff #404040;
+  }
+  .fileitem {
+    padding: 3px 4px; cursor: pointer; display: flex; justify-content: space-between; gap: 4px;
+    white-space: nowrap; overflow: hidden;
+  }
+  .fileitem .fname { overflow: hidden; text-overflow: ellipsis; }
+  .fileitem.sel { background: #000080; color: #fff; }
+  .fileitem .cnt { flex: none; color: #808080; }
+  .fileitem.sel .cnt { color: #ffff80; }
+  .filepane .btn95 { margin-top: 4px; width: 100%; }
+  /* center: canvas */
+  .canvaswrap { flex: 1; position: relative; background: #808080; min-width: 0; }
+  #mainCanvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+  #dropOverlay {
+    position: absolute; inset: 0; display: none;
+    background: rgba(0,0,128,0.35);
+    border: 4px dashed #fff;
+    color: #fff; font-size: 20px; font-weight: bold;
+    align-items: center; justify-content: center;
+    pointer-events: none; z-index: 5;
+  }
+  #emptyMsg {
+    position: absolute; inset: 0; display: flex; flex-direction: column; gap: 8px;
+    align-items: center; justify-content: center; color: #d0d0d0; font-size: 14px;
+    pointer-events: none;
+  }
+  /* right: settings + regions */
+  .rightpane {
+    width: 232px; flex: none; display: flex; flex-direction: column;
+    border-left: 1px solid #fff; box-shadow: -1px 0 0 #808080;
+    padding: 4px; overflow-y: auto;
+  }
+  fieldset {
+    border: 1px solid; border-color: #808080 #fff #fff #808080;
+    box-shadow: 1px 1px 0 #fff inset;
+    padding: 6px; margin-bottom: 6px;
+  }
+  legend { padding: 0 4px; font-weight: bold; }
+  .row { display: flex; align-items: center; gap: 4px; margin: 3px 0; flex-wrap: wrap; }
+  .row label { flex: none; }
+  .thumbgrid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
+    background: #fff; border: 2px solid; border-color: #404040 #fff #fff #404040;
+    padding: 4px; min-height: 60px;
+  }
+  .thumbcell { position: relative; border: 1px solid #808080; cursor: pointer; aspect-ratio: 1; background:
+    repeating-conic-gradient(#e0e0e0 0 25%, #fff 0 50%) 0 0 / 12px 12px; }
+  .thumbcell.sel { outline: 2px solid #000080; }
+  .thumbcell canvas { width: 100%; height: 100%; display: block; object-fit: contain; }
+  .thumbcell .num {
+    position: absolute; left: 0; top: 0; background: #000080; color: #fff;
+    font-size: 10px; padding: 0 3px;
+  }
+  .thumbcell .del {
+    position: absolute; right: 0; top: 0; width: 14px; height: 14px;
+    background: #c0c0c0; border: 1px solid; border-color: #fff #404040 #404040 #fff;
+    font-size: 9px; line-height: 12px; text-align: center; cursor: pointer;
+  }
+  .exportbtns .btn95 { width: 100%; margin: 2px 0; font-weight: bold; }
+  .statusbar {
+    flex: none; display: flex; gap: 2px; padding: 2px 3px;
+    border-top: 1px solid #fff;
+  }
+  .statuscell {
+    border: 1px solid; border-color: #808080 #fff #fff #808080;
+    padding: 2px 6px; white-space: nowrap;
+  }
+  .statuscell.grow { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+  .hint { color: #404040; margin-top: 2px; }
+  /* dialog */
+  .dlgback { position: fixed; inset: 0; background: rgba(0,0,0,0.2); display: none; align-items: center; justify-content: center; z-index: 20; }
+  .dlg {
+    background: #c0c0c0; border: 2px solid; border-color: #dfdfdf #000 #000 #dfdfdf;
+    box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #808080, 3px 3px 0 rgba(0,0,0,0.3);
+    min-width: 300px; max-width: 460px;
+  }
+  .dlg .body { padding: 12px; line-height: 1.6; user-select: text; }
+  .dlg .btns { display: flex; justify-content: center; gap: 8px; padding: 0 12px 12px; }
+  .dlg .btns .btn95 { min-width: 76px; }
+</style>
+</head>
+<body>
+<div class="win">
+  <div class="titlebar"><span class="ticon">✂</span><span>素材切り出しツール -切りヌくん- v1.1</span></div>
+
+  <div class="toolbar">
+    <button class="btn95" id="btnOpen">画像を開く...</button>
+    <span class="sep"></span>
+    <button class="btn95" id="btnZoomOut">－</button>
+    <span class="statuscell" id="zoomLabel" style="min-width:52px;text-align:center;">100%</span>
+    <button class="btn95" id="btnZoomIn">＋</button>
+    <button class="btn95" id="btnFit">全体表示</button>
+    <span class="sep"></span>
+    <label><input type="checkbox" id="chkSquare"> 正方形で選択</label>
+    <span class="sep"></span>
+    <button class="btn95" id="btnUndo">元に戻す</button>
+    <button class="btn95" id="btnClear">選択を全消去</button>
+    <span class="sep"></span>
+    <button class="btn95" id="btnHelp">ヘルプ</button>
+  </div>
+
+  <div class="main">
+    <div class="filepane">
+      <div class="pane-title">読み込んだ画像</div>
+      <div class="filelist" id="fileList"></div>
+      <button class="btn95" id="btnAddMore">画像を追加...</button>
+      <button class="btn95" id="btnRemoveFile">この画像を外す</button>
+    </div>
+
+    <div class="canvaswrap" id="canvasWrap">
+      <canvas id="mainCanvas"></canvas>
+      <div id="emptyMsg">
+        <div>ここに画像をドラッグ&amp;ドロップ</div>
+        <div style="font-size:12px;">または左上の「画像を開く...」から読み込み</div>
+      </div>
+      <div id="dropOverlay">ここにドロップして追加</div>
+    </div>
+
+    <div class="rightpane">
+      <fieldset>
+        <legend>出力設定</legend>
+        <div class="row">
+          <label>サイズ</label>
+          <select id="selSize">
+            <option value="original">等倍 (リサイズなし)</option>
+            <option value="512">512px</option>
+            <option value="768">768px</option>
+            <option value="1024" selected>1024px</option>
+            <option value="custom">カスタム</option>
+          </select>
+          <input type="number" id="numCustomSize" value="1024" min="16" max="4096" style="display:none;">
+        </div>
+        <div class="row">
+          <label>整形</label>
+          <select id="selShape">
+            <option value="none">そのまま (長辺=サイズ)</option>
+            <option value="crop">正方形に切り抜き</option>
+            <option value="pad" selected>正方形に余白</option>
+          </select>
+        </div>
+        <div class="row" id="rowPad">
+          <label>余白の色</label>
+          <select id="selPadColor">
+            <option value="#ffffff" selected>白</option>
+            <option value="#000000">黒</option>
+            <option value="transparent">透過</option>
+          </select>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>グリッド分割</legend>
+        <div class="row">
+          <label>縦</label><input type="number" id="numRows" value="2" min="1" max="20">
+          <label>× 横</label><input type="number" id="numCols" value="3" min="1" max="20">
+        </div>
+        <div class="row">
+          <label>内側マージン</label><input type="number" id="numMargin" value="0" min="0" max="500"><label>px</label>
+        </div>
+        <div class="row">
+          <button class="btn95" id="btnGrid" style="width:100%;">グリッドで分割する</button>
+        </div>
+        <div class="hint">表情集などマス目状のシート向け。分割後に各枠を個別に調整できます。</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>ファイル名</legend>
+        <div class="row">
+          <label>接頭辞</label>
+          <input type="text" id="txtPrefix" value="img" style="flex:1;min-width:60px;">
+        </div>
+        <div class="row">
+          <label>開始番号</label>
+          <input type="number" id="numStart" value="1" min="0" max="99999">
+        </div>
+        <div class="hint">例: img_001.png から連番</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>選択範囲 (<span id="regionCount">0</span>)</legend>
+        <div class="thumbgrid" id="thumbGrid"></div>
+      </fieldset>
+
+      <div class="exportbtns">
+        <button class="btn95" id="btnExportCur">この画像を書き出し (ZIP)</button>
+        <button class="btn95" id="btnExportAll">全画像を書き出し (ZIP)</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div class="statuscell grow" id="stFile">画像なし</div>
+    <div class="statuscell" id="stPos">-</div>
+    <div class="statuscell" id="stCount">選択 0</div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" accept="image/*" multiple style="display:none;">
+
+<div class="dlgback" id="dlgBack">
+  <div class="dlg">
+    <div class="titlebar" style="margin:3px;"><span id="dlgTitle">切りヌくん</span></div>
+    <div class="body" id="dlgBody"></div>
+    <div class="btns" id="dlgBtns"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ========== state ========== */
+const files = []; // {name, img, w, h, regions:[{x,y,w,h}], undoStack:[]}
+let cur = -1;
+let zoom = 1, panX = 0, panY = 0;
+let selRegion = -1;
+let drag = null; // {mode:'new'|'move'|'resize'|'pan', ...}
+let dragDepth = 0;
+const HANDLE_PX = 7;
+
+const $ = id => document.getElementById(id);
+const canvas = $("mainCanvas");
+const ctx = canvas.getContext("2d");
+const wrap = $("canvasWrap");
+
+function curFile(){ return cur >= 0 ? files[cur] : null; }
+
+/* ========== dialog ========== */
+function showDlg(title, html, buttons){
+  $("dlgTitle").textContent = title;
+  $("dlgBody").innerHTML = html;
+  const btns = $("dlgBtns");
+  btns.innerHTML = "";
+  (buttons || [{label:"OK"}]).forEach(b => {
+    const el = document.createElement("button");
+    el.className = "btn95";
+    el.textContent = b.label;
+    el.onclick = () => { $("dlgBack").style.display = "none"; if(b.onclick) b.onclick(); };
+    btns.appendChild(el);
+  });
+  $("dlgBack").style.display = "flex";
+}
+
+/* ========== file loading ========== */
+function addImageFiles(list){
+  const arr = Array.from(list).filter(f => f.type.startsWith("image/"));
+  if(!arr.length) return;
+  let remaining = arr.length;
+  arr.forEach(f => {
+    const url = URL.createObjectURL(f);
+    const img = new Image();
+    img.onload = () => {
+      files.push({name: f.name, img, w: img.naturalWidth, h: img.naturalHeight, regions: [], undoStack: []});
+      if(cur < 0){ cur = 0; fitZoom(); }
+      if(--remaining === 0){
+        if(cur < 0) cur = 0;
+        refreshAll();
+      } else {
+        refreshFileList();
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      if(--remaining === 0) refreshAll();
+    };
+    img.src = url;
+  });
+}
+
+$("btnOpen").onclick = () => $("fileInput").click();
+$("btnAddMore").onclick = () => $("fileInput").click();
+$("fileInput").onchange = e => { addImageFiles(e.target.files); e.target.value = ""; };
+
+$("btnRemoveFile").onclick = () => {
+  if(cur < 0) return;
+  files.splice(cur, 1);
+  if(cur >= files.length) cur = files.length - 1;
+  selRegion = -1;
+  if(cur >= 0) fitZoom();
+  refreshAll();
+};
+
+/* drag & drop (counter-based so the overlay never gets stuck) */
+["dragenter","dragover","dragleave","drop"].forEach(ev =>
+  document.addEventListener(ev, e => e.preventDefault()));
+document.addEventListener("dragenter", e => {
+  if(e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files")){
+    dragDepth++;
+    $("dropOverlay").style.display = "flex";
+  }
+});
+document.addEventListener("dragleave", () => {
+  if(dragDepth > 0) dragDepth--;
+  if(dragDepth === 0) $("dropOverlay").style.display = "none";
+});
+document.addEventListener("drop", e => {
+  dragDepth = 0;
+  $("dropOverlay").style.display = "none";
+  if(e.dataTransfer) addImageFiles(e.dataTransfer.files);
+});
+
+/* ========== coords / zoom ========== */
+function screenToImg(sx, sy){
+  return { x: (sx - panX) / zoom, y: (sy - panY) / zoom };
+}
+function setZoom(z, cx, cy){
+  z = Math.min(8, Math.max(0.05, z));
+  if(cx === undefined){ cx = wrap.clientWidth / 2; cy = wrap.clientHeight / 2; }
+  const p = screenToImg(cx, cy);
+  zoom = z;
+  panX = cx - p.x * zoom;
+  panY = cy - p.y * zoom;
+  $("zoomLabel").textContent = Math.round(zoom * 100) + "%";
+  render();
+}
+function fitZoom(){
+  const f = curFile();
+  if(!f) return;
+  const zw = wrap.clientWidth / f.w, zh = wrap.clientHeight / f.h;
+  zoom = Math.min(zw, zh) * 0.97;
+  panX = (wrap.clientWidth - f.w * zoom) / 2;
+  panY = (wrap.clientHeight - f.h * zoom) / 2;
+  $("zoomLabel").textContent = Math.round(zoom * 100) + "%";
+  render();
+}
+$("btnZoomIn").onclick = () => setZoom(zoom * 1.25);
+$("btnZoomOut").onclick = () => setZoom(zoom / 1.25);
+$("btnFit").onclick = fitZoom;
+wrap.addEventListener("wheel", e => {
+  if(!curFile()) return;
+  e.preventDefault();
+  const r = wrap.getBoundingClientRect();
+  const k = e.deltaY < 0 ? 1.1 : 1/1.1;
+  setZoom(zoom * k, e.clientX - r.left, e.clientY - r.top);
+}, {passive: false});
+
+/* ========== undo ========== */
+function pushUndo(){
+  const f = curFile();
+  if(!f) return;
+  f.undoStack.push(JSON.stringify(f.regions));
+  if(f.undoStack.length > 60) f.undoStack.shift();
+}
+function undo(){
+  const f = curFile();
+  if(!f || !f.undoStack.length) return;
+  f.regions = JSON.parse(f.undoStack.pop());
+  if(selRegion >= f.regions.length) selRegion = -1;
+  refreshRegions();
+}
+$("btnUndo").onclick = undo;
+$("btnClear").onclick = () => {
+  const f = curFile();
+  if(!f || !f.regions.length) return;
+  pushUndo();
+  f.regions = [];
+  selRegion = -1;
+  refreshRegions();
+};
+
+/* ========== region interaction ========== */
+function regionHandles(r){
+  return [
+    {n:"nw", x:r.x,        y:r.y},
+    {n:"n",  x:r.x+r.w/2,  y:r.y},
+    {n:"ne", x:r.x+r.w,    y:r.y},
+    {n:"e",  x:r.x+r.w,    y:r.y+r.h/2},
+    {n:"se", x:r.x+r.w,    y:r.y+r.h},
+    {n:"s",  x:r.x+r.w/2,  y:r.y+r.h},
+    {n:"sw", x:r.x,        y:r.y+r.h},
+    {n:"w",  x:r.x,        y:r.y+r.h/2},
+  ];
+}
+function hitTest(p){
+  const f = curFile();
+  if(!f) return null;
+  const tol = HANDLE_PX / zoom;
+  // handles of selected region first
+  if(selRegion >= 0 && f.regions[selRegion]){
+    for(const h of regionHandles(f.regions[selRegion])){
+      if(Math.abs(p.x - h.x) <= tol && Math.abs(p.y - h.y) <= tol)
+        return {type:"handle", idx: selRegion, handle: h.n};
+    }
+  }
+  for(let i = f.regions.length - 1; i >= 0; i--){
+    const r = f.regions[i];
+    for(const h of regionHandles(r)){
+      if(Math.abs(p.x - h.x) <= tol && Math.abs(p.y - h.y) <= tol)
+        return {type:"handle", idx: i, handle: h.n};
+    }
+    if(p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h)
+      return {type:"region", idx: i};
+  }
+  return null;
+}
+function clampRegion(r, f){
+  r.x = Math.max(0, Math.min(f.w - r.w, r.x));
+  r.y = Math.max(0, Math.min(f.h - r.h, r.y));
+  if(r.w > f.w){ r.x = 0; r.w = f.w; }
+  if(r.h > f.h){ r.y = 0; r.h = f.h; }
+}
+function normRect(r){
+  if(r.w < 0){ r.x += r.w; r.w = -r.w; }
+  if(r.h < 0){ r.y += r.h; r.h = -r.h; }
+  return r;
+}
+
+canvas.addEventListener("pointerdown", e => {
+  const f = curFile();
+  if(!f || e.button === 2) return;
+  canvas.setPointerCapture(e.pointerId);
+  const rect = canvas.getBoundingClientRect();
+  const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+  const p = screenToImg(sx, sy);
+
+  if(e.shiftKey || e.button === 1){
+    drag = {mode:"pan", sx, sy, panX, panY};
+    return;
+  }
+  const hit = hitTest(p);
+  if(hit && hit.type === "handle"){
+    pushUndo();
+    selRegion = hit.idx;
+    drag = {mode:"resize", idx: hit.idx, handle: hit.handle, start: {...f.regions[hit.idx]}, p0: p};
+  } else if(hit && hit.type === "region"){
+    pushUndo();
+    selRegion = hit.idx;
+    drag = {mode:"move", idx: hit.idx, start: {...f.regions[hit.idx]}, p0: p, moved: false};
+  } else {
+    selRegion = -1;
+    drag = {mode:"new", p0: p, r: null};
+  }
+  render();
+});
+
+canvas.addEventListener("pointermove", e => {
+  const f = curFile();
+  const rect = canvas.getBoundingClientRect();
+  const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+  const p = screenToImg(sx, sy);
+  if(f) $("stPos").textContent = Math.round(p.x) + ", " + Math.round(p.y);
+
+  if(!drag || !f){ updateCursor(p); return; }
+
+  if(drag.mode === "pan"){
+    panX = drag.panX + (sx - drag.sx);
+    panY = drag.panY + (sy - drag.sy);
+    render();
+    return;
+  }
+  const square = $("chkSquare").checked;
+  if(drag.mode === "new"){
+    let w = p.x - drag.p0.x, h = p.y - drag.p0.y;
+    if(square){
+      const s = Math.max(Math.abs(w), Math.abs(h));
+      w = Math.sign(w || 1) * s;
+      h = Math.sign(h || 1) * s;
+    }
+    drag.r = normRect({x: drag.p0.x, y: drag.p0.y, w, h});
+    render();
+  } else if(drag.mode === "move"){
+    const r = f.regions[drag.idx];
+    r.x = drag.start.x + (p.x - drag.p0.x);
+    r.y = drag.start.y + (p.y - drag.p0.y);
+    clampRegion(r, f);
+    drag.moved = true;
+    render();
+  } else if(drag.mode === "resize"){
+    const s = drag.start;
+    const dx = p.x - drag.p0.x, dy = p.y - drag.p0.y;
+    let r = {...s};
+    const hd = drag.handle;
+    if(hd.includes("w")){ r.x = s.x + dx; r.w = s.w - dx; }
+    if(hd.includes("e")){ r.w = s.w + dx; }
+    if(hd.includes("n")){ r.y = s.y + dy; r.h = s.h - dy; }
+    if(hd.includes("s")){ r.h = s.h + dy; }
+    if(square && hd.length === 2){
+      // corner: anchor is opposite corner
+      const ax = hd.includes("w") ? s.x + s.w : s.x;
+      const ay = hd.includes("n") ? s.y + s.h : s.y;
+      const sz = Math.max(Math.abs(p.x - ax), Math.abs(p.y - ay));
+      r.x = p.x < ax ? ax - sz : ax;
+      r.y = p.y < ay ? ay - sz : ay;
+      r.w = sz; r.h = sz;
+    } else {
+      normRect(r);
+      if(square){
+        const sz = Math.max(r.w, r.h);
+        const cx = r.x + r.w/2, cy = r.y + r.h/2;
+        r = {x: cx - sz/2, y: cy - sz/2, w: sz, h: sz};
+      }
+    }
+    f.regions[drag.idx] = r;
+    render();
+  }
+});
+
+canvas.addEventListener("pointerup", e => {
+  const f = curFile();
+  if(!drag){ return; }
+  const d = drag;
+  drag = null;
+  if(!f) return;
+  if(d.mode === "new"){
+    if(d.r && d.r.w >= 4 && d.r.h >= 4){
+      pushUndo();
+      const r = d.r;
+      // intersect with image bounds
+      const x1 = Math.max(0, r.x), y1 = Math.max(0, r.y);
+      const x2 = Math.min(f.w, r.x + r.w), y2 = Math.min(f.h, r.y + r.h);
+      if(x2 - x1 >= 4 && y2 - y1 >= 4){
+        f.regions.push({x: x1, y: y1, w: x2 - x1, h: y2 - y1});
+        selRegion = f.regions.length - 1;
+      }
+    }
+    refreshRegions();
+  } else if(d.mode === "move"){
+    if(!d.moved) f.undoStack.pop(); // plain click, discard the undo entry
+    refreshRegions();
+  } else if(d.mode === "resize"){
+    const r = f.regions[d.idx];
+    const x1 = Math.max(0, r.x), y1 = Math.max(0, r.y);
+    const x2 = Math.min(f.w, r.x + r.w), y2 = Math.min(f.h, r.y + r.h);
+    if(x2 - x1 >= 4 && y2 - y1 >= 4)
+      f.regions[d.idx] = {x: x1, y: y1, w: x2 - x1, h: y2 - y1};
+    else
+      f.regions[d.idx] = d.start;
+    refreshRegions();
+  } else {
+    render();
+  }
+});
+
+function updateCursor(p){
+  const f = curFile();
+  if(!f){ canvas.style.cursor = "default"; return; }
+  const hit = hitTest(p);
+  if(hit && hit.type === "handle"){
+    const c = {nw:"nwse-resize", se:"nwse-resize", ne:"nesw-resize", sw:"nesw-resize",
+               n:"ns-resize", s:"ns-resize", e:"ew-resize", w:"ew-resize"};
+    canvas.style.cursor = c[hit.handle];
+  } else if(hit && hit.type === "region"){
+    canvas.style.cursor = "move";
+  } else {
+    canvas.style.cursor = "crosshair";
+  }
+}
+
+/* keyboard */
+document.addEventListener("keydown", e => {
+  if(e.target.tagName === "INPUT" || e.target.tagName === "SELECT" || e.target.tagName === "TEXTAREA") return;
+  const f = curFile();
+  if(e.ctrlKey && e.key.toLowerCase() === "z"){ e.preventDefault(); undo(); return; }
+  if(!f) return;
+  if((e.key === "Delete" || e.key === "Backspace") && selRegion >= 0){
+    e.preventDefault();
+    pushUndo();
+    f.regions.splice(selRegion, 1);
+    selRegion = -1;
+    refreshRegions();
+    return;
+  }
+  const step = e.shiftKey ? 10 : 1;
+  const mv = {ArrowLeft:[-step,0], ArrowRight:[step,0], ArrowUp:[0,-step], ArrowDown:[0,step]}[e.key];
+  if(mv && selRegion >= 0){
+    e.preventDefault();
+    const r = f.regions[selRegion];
+    r.x += mv[0]; r.y += mv[1];
+    clampRegion(r, f);
+    refreshRegions();
+  }
+});
+
+/* ========== grid split ========== */
+$("btnGrid").onclick = () => {
+  const f = curFile();
+  if(!f) return;
+  const rows = Math.max(1, +$("numRows").value || 1);
+  const cols = Math.max(1, +$("numCols").value || 1);
+  const m = Math.max(0, +$("numMargin").value || 0);
+  const apply = () => {
+    pushUndo();
+    f.regions = [];
+    const cw = f.w / cols, ch = f.h / rows;
+    for(let r = 0; r < rows; r++){
+      for(let c = 0; c < cols; c++){
+        const x = c * cw + m, y = r * ch + m;
+        const w = cw - m * 2, h = ch - m * 2;
+        if(w >= 4 && h >= 4) f.regions.push({x, y, w, h});
+      }
+    }
+    selRegion = -1;
+    refreshRegions();
+  };
+  if(f.regions.length){
+    showDlg("確認", "今ある選択範囲 (" + f.regions.length + "個) を消してグリッドで置き換えます。<br>よろしいですか?",
+      [{label:"はい", onclick: apply}, {label:"キャンセル"}]);
+  } else apply();
+};
+
+/* ========== rendering ========== */
+function resizeCanvas(){
+  const dpr = window.devicePixelRatio || 1;
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  if(canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)){
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function render(){
+  resizeCanvas();
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const f = curFile();
+  $("emptyMsg").style.display = f ? "none" : "flex";
+  if(!f) return;
+  ctx.save();
+  ctx.translate(panX, panY);
+  ctx.scale(zoom, zoom);
+  ctx.imageSmoothingEnabled = zoom < 1;
+  ctx.drawImage(f.img, 0, 0);
+  ctx.restore();
+
+  // regions in screen space for crisp 1px lines
+  f.regions.forEach((r, i) => {
+    const x = panX + r.x * zoom, y = panY + r.y * zoom;
+    const rw = r.w * zoom, rh = r.h * zoom;
+    const sel = i === selRegion;
+    ctx.fillStyle = sel ? "rgba(0,0,255,0.12)" : "rgba(0,128,255,0.08)";
+    ctx.fillRect(x, y, rw, rh);
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeStyle = sel ? "#0000ff" : "#0080ff";
+    ctx.strokeRect(x + 0.5, y + 0.5, rw, rh);
+    // number badge
+    ctx.fillStyle = sel ? "#0000c0" : "#0060c0";
+    const label = String(i + 1);
+    ctx.font = "bold 12px sans-serif";
+    const tw = ctx.measureText(label).width + 8;
+    ctx.fillRect(x, y, tw, 16);
+    ctx.fillStyle = "#fff";
+    ctx.fillText(label, x + 4, y + 12);
+    // handles
+    if(sel){
+      ctx.fillStyle = "#fff";
+      ctx.strokeStyle = "#0000ff";
+      ctx.lineWidth = 1;
+      regionHandles(r).forEach(hd => {
+        const hx = panX + hd.x * zoom, hy = panY + hd.y * zoom;
+        ctx.fillRect(hx - 3.5, hy - 3.5, 7, 7);
+        ctx.strokeRect(hx - 3.5 + 0.5, hy - 3.5 + 0.5, 6, 6);
+      });
+    }
+  });
+
+  // preview of a region being created
+  if(drag && drag.mode === "new" && drag.r){
+    const r = drag.r;
+    const x = panX + r.x * zoom, y = panY + r.y * zoom;
+    ctx.fillStyle = "rgba(255,0,0,0.08)";
+    ctx.fillRect(x, y, r.w * zoom, r.h * zoom);
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = "#ff0000";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, r.w * zoom, r.h * zoom);
+    ctx.setLineDash([]);
+  }
+}
+
+/* ========== side panels ========== */
+function refreshFileList(){
+  const list = $("fileList");
+  list.innerHTML = "";
+  files.forEach((f, i) => {
+    const el = document.createElement("div");
+    el.className = "fileitem" + (i === cur ? " sel" : "");
+    const nm = document.createElement("span");
+    nm.className = "fname";
+    nm.textContent = f.name;
+    nm.title = f.name;
+    const c = document.createElement("span");
+    c.className = "cnt";
+    c.textContent = f.regions.length ? "(" + f.regions.length + ")" : "";
+    el.appendChild(nm); el.appendChild(c);
+    el.onclick = () => { cur = i; selRegion = -1; fitZoom(); refreshAll(); };
+    list.appendChild(el);
+  });
+}
+function refreshThumbs(){
+  const grid = $("thumbGrid");
+  grid.innerHTML = "";
+  const f = curFile();
+  const n = f ? f.regions.length : 0;
+  $("regionCount").textContent = n;
+  $("stCount").textContent = "選択 " + n;
+  if(!f) return;
+  f.regions.forEach((r, i) => {
+    const cell = document.createElement("div");
+    cell.className = "thumbcell" + (i === selRegion ? " sel" : "");
+    const tc = document.createElement("canvas");
+    const S = 96;
+    tc.width = S; tc.height = S;
+    const tctx = tc.getContext("2d");
+    const sc = Math.min(S / r.w, S / r.h);
+    const dw = r.w * sc, dh = r.h * sc;
+    tctx.imageSmoothingQuality = "medium";
+    tctx.drawImage(f.img, r.x, r.y, r.w, r.h, (S - dw) / 2, (S - dh) / 2, dw, dh);
+    const num = document.createElement("span");
+    num.className = "num";
+    num.textContent = i + 1;
+    const del = document.createElement("span");
+    del.className = "del";
+    del.textContent = "×";
+    del.onclick = ev => {
+      ev.stopPropagation();
+      pushUndo();
+      f.regions.splice(i, 1);
+      if(selRegion === i) selRegion = -1;
+      else if(selRegion > i) selRegion--;
+      refreshRegions();
+    };
+    cell.onclick = () => { selRegion = i; render(); refreshThumbs(); };
+    cell.appendChild(tc); cell.appendChild(num); cell.appendChild(del);
+    grid.appendChild(cell);
+  });
+}
+function refreshRegions(){
+  render();
+  refreshThumbs();
+  refreshFileList();
+}
+function refreshAll(){
+  refreshFileList();
+  refreshThumbs();
+  render();
+  const f = curFile();
+  $("stFile").textContent = f ? f.name + "  (" + f.w + "×" + f.h + ")" : "画像なし";
+  $("stPos").textContent = "-";
+}
+
+/* ========== settings ========== */
+$("selSize").onchange = () => {
+  $("numCustomSize").style.display = $("selSize").value === "custom" ? "" : "none";
+};
+$("selShape").onchange = () => {
+  $("rowPad").style.display = $("selShape").value === "pad" ? "" : "none";
+};
+function getSettings(){
+  const v = $("selSize").value;
+  let size = null; // null = 等倍
+  if(v !== "original"){
+    size = v === "custom" ? (+$("numCustomSize").value || 1024) : +v;
+    size = Math.min(4096, Math.max(16, Math.round(size)));
+  }
+  return { size, shape: $("selShape").value, padColor: $("selPadColor").value };
+}
+
+/* ========== export ========== */
+function regionToBlob(f, r, st){
+  return new Promise(resolve => {
+    let sx = r.x, sy = r.y, sw = r.w, sh = r.h;
+    if(st.shape === "crop"){
+      const s = Math.min(sw, sh);
+      sx += (sw - s) / 2; sy += (sh - s) / 2;
+      sw = s; sh = s;
+    }
+    const c = document.createElement("canvas");
+    const cctx = c.getContext("2d");
+    // 等倍(size=null)の場合は出力辺長を選択範囲そのものから決める
+    const outSize = st.size !== null ? st.size : Math.max(1, Math.round(Math.max(sw, sh)));
+    if(st.shape === "none"){
+      const sc = outSize / Math.max(sw, sh);
+      c.width = Math.max(1, Math.round(sw * sc));
+      c.height = Math.max(1, Math.round(sh * sc));
+      cctx.imageSmoothingQuality = "high";
+      cctx.drawImage(f.img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+    } else {
+      c.width = outSize; c.height = outSize;
+      cctx.imageSmoothingQuality = "high";
+      if(st.shape === "pad"){
+        if(st.padColor !== "transparent"){
+          cctx.fillStyle = st.padColor;
+          cctx.fillRect(0, 0, outSize, outSize);
+        }
+        const sc = outSize / Math.max(sw, sh);
+        const dw = sw * sc, dh = sh * sc;
+        cctx.drawImage(f.img, sx, sy, sw, sh, (outSize - dw) / 2, (outSize - dh) / 2, dw, dh);
+      } else { // crop
+        cctx.drawImage(f.img, sx, sy, sw, sh, 0, 0, outSize, outSize);
+      }
+    }
+    c.toBlob(b => resolve(b), "image/png");
+  });
+}
+
+/* minimal ZIP writer (stored / no compression) */
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for(let n = 0; n < 256; n++){
+    let c = n;
+    for(let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(buf){
+  let c = 0xFFFFFFFF;
+  for(let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function buildZip(entries){ // [{name, data:Uint8Array}]
+  const enc = new TextEncoder();
+  const parts = [], central = [];
+  let offset = 0;
+  for(const f of entries){
+    const nameBytes = enc.encode(f.name);
+    const crc = crc32(f.data);
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true);
+    lh.setUint16(4, 20, true);
+    lh.setUint16(6, 0x0800, true); // UTF-8 filenames
+    lh.setUint16(8, 0, true);      // stored
+    lh.setUint32(14, crc, true);
+    lh.setUint32(18, f.data.length, true);
+    lh.setUint32(22, f.data.length, true);
+    lh.setUint16(26, nameBytes.length, true);
+    parts.push(new Uint8Array(lh.buffer), nameBytes, f.data);
+    central.push({nameBytes, crc, size: f.data.length, offset});
+    offset += 30 + nameBytes.length + f.data.length;
+  }
+  const cdStart = offset;
+  let cdSize = 0;
+  for(const c of central){
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true);
+    ch.setUint16(4, 20, true);
+    ch.setUint16(6, 20, true);
+    ch.setUint16(8, 0x0800, true);
+    ch.setUint32(16, c.crc, true);
+    ch.setUint32(20, c.size, true);
+    ch.setUint32(24, c.size, true);
+    ch.setUint16(28, c.nameBytes.length, true);
+    ch.setUint32(42, c.offset, true);
+    parts.push(new Uint8Array(ch.buffer), c.nameBytes);
+    cdSize += 46 + c.nameBytes.length;
+  }
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, central.length, true);
+  eocd.setUint16(10, central.length, true);
+  eocd.setUint32(12, cdSize, true);
+  eocd.setUint32(16, cdStart, true);
+  parts.push(new Uint8Array(eocd.buffer));
+  return new Blob(parts, {type: "application/zip"});
+}
+
+function pad3(n){ return String(n).padStart(3, "0"); }
+
+async function exportFiles(targets, zipName){
+  const st = getSettings();
+  const prefix = ($("txtPrefix").value || "img").trim() || "img";
+  let num = Math.max(0, Math.round(+$("numStart").value || 1));
+  const entries = [];
+  for(const f of targets){
+    for(const r of f.regions){
+      const blob = await regionToBlob(f, r, st);
+      if(!blob) continue;
+      const data = new Uint8Array(await blob.arrayBuffer());
+      entries.push({name: prefix + "_" + pad3(num) + ".png", data});
+      num++;
+    }
+  }
+  if(!entries.length){
+    showDlg("切りヌくん", "書き出す選択範囲がありません。<br>画像上をドラッグして範囲を作ってください。");
+    return;
+  }
+  const zip = buildZip(entries);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(zip);
+  a.download = zipName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  showDlg("書き出し完了", entries.length + " 枚を「" + zipName + "」に書き出しました。");
+}
+
+$("btnExportCur").onclick = () => {
+  const f = curFile();
+  if(!f) return;
+  const base = f.name.replace(/\.[^.]+$/, "");
+  exportFiles([f], base + "_cut.zip");
+};
+$("btnExportAll").onclick = () => {
+  if(!files.length) return;
+  exportFiles(files, "lora_materials.zip");
+};
+
+/* ========== help ========== */
+$("btnHelp").onclick = () => {
+  showDlg("ヘルプ", [
+    "<b>基本操作</b><br>",
+    "・画像上をドラッグ → 選択範囲を追加<br>",
+    "・範囲をドラッグ → 移動 / ハンドルで変形<br>",
+    "・Shift+ドラッグ → 画面パン / ホイール → ズーム<br>",
+    "・Delete → 選択中の範囲を削除 / Ctrl+Z → 元に戻す<br>",
+    "・矢印キー → 1px移動 (Shiftで10px)<br><br>",
+    "<b>表情集の場合</b><br>",
+    "グリッド分割で一括生成 → 各枠を微調整すると速いです。<br><br>",
+    "<b>書き出し</b><br>",
+    "選択範囲は番号順に連番PNGとしてZIPにまとまります。<br><br>",
+    "Presented by:<a href='https://ichinoji-maruichi.github.io/' target='_blank' rel='noopener'>マルイチソフト</a>"
+  ].join(""));
+};
+
+/* ========== init ========== */
+const ro = new ResizeObserver(() => render());
+ro.observe(wrap);
+$("selShape").onchange();
+$("selSize").onchange();
+refreshAll();
+</script>
+</body>
+</html>
