@@ -150,7 +150,7 @@
     box-shadow: inset 1px 1px 0 #fff, inset -1px -1px 0 #808080, 3px 3px 0 rgba(0,0,0,0.3);
     min-width: 300px; max-width: 460px;
   }
-  .dlg .body { padding: 12px; line-height: 1.6; user-select: text; }
+  .dlg .body { padding: 12px; line-height: 1.6; user-select: text; max-height: 80vh; overflow-y: auto; }
   .dlg .btns { display: flex; justify-content: center; gap: 8px; padding: 0 12px 12px; }
   .dlg .btns .btn95 { min-width: 76px; }
 </style>
@@ -170,7 +170,7 @@
     <label><input type="checkbox" id="chkSquare"> 正方形で選択</label>
     <span class="sep"></span>
     <button class="btn95" id="btnUndo">元に戻す</button>
-    <button class="btn95" id="btnClear">選択を全消去</button>
+    <button class="btn95" id="btnClear">この画像の選択を消去</button>
     <span class="sep"></span>
     <button class="btn95" id="btnHelp">ヘルプ</button>
   </div>
@@ -225,6 +225,32 @@
       </fieldset>
 
       <fieldset>
+        <legend>自動検出</legend>
+        <div class="row">
+          <label>対象</label>
+          <select id="selDetectPreset" style="flex:1;min-width:120px;">
+            <option value="design" selected>資料 (文字を除く)</option>
+            <option value="sheet">素材シート (小さい絵も拾う)</option>
+          </select>
+        </div>
+        <div class="row">
+          <button class="btn95" id="btnDetect" style="width:100%;">自動検出</button>
+        </div>
+        <div class="row">
+          <label>枚数</label><input type="number" id="numDetectCount" value="6" min="1" max="200"><label>枚</label>
+        </div>
+        <div class="row">
+          <button class="btn95" id="btnDetectCount" style="width:100%;">この枚数に合わせる</button>
+        </div>
+        <div class="row">
+          <label>結果を</label>
+          <label><input type="radio" name="detectMode" value="replace" checked> 置き換える</label>
+          <label><input type="radio" name="detectMode" value="add"> 追加する</label>
+        </div>
+        <div class="hint" id="detectHint">検出した枠は手で直せます。うまく出ないときは対象を切り替えてください。</div>
+      </fieldset>
+
+      <fieldset>
         <legend>グリッド分割</legend>
         <div class="row">
           <label>縦</label><input type="number" id="numRows" value="2" min="1" max="20">
@@ -236,7 +262,11 @@
         <div class="row">
           <button class="btn95" id="btnGrid" style="width:100%;">グリッドで分割する</button>
         </div>
-        <div class="hint">表情集などマス目状のシート向け。分割後に各枠を個別に調整できます。</div>
+        <div class="row">
+          <button class="btn95" id="btnGridDetect" style="width:100%;">マス目ごとに検出</button>
+        </div>
+        <div class="hint">表情集などマス目状のシート向け。分割後に各枠を個別に調整できます。<br>
+          「マス目ごとに検出」は各マスの中だけを見て絵の形に合わせるので、罫線や隣の絵に影響されません。</div>
       </fieldset>
 
       <fieldset>
@@ -280,6 +310,360 @@
     <div class="btns" id="dlgBtns"></div>
   </div>
 </div>
+
+<script>
+/*!
+ * 切り出し範囲の自動検出 — 連結成分ラベリング方式
+ * 依存なし。単一HTMLの <script> にそのまま貼れます。
+ *
+ *   const res = KirinukunDetect.detect(imageData, KirinukunDetect.PRESET.sheet);
+ *   res.boxes // → [{x, y, w, h}, ...]  読み順（上→下、左→右）
+ *
+ *   // 写り込み消し付きで切り出す場合
+ *   const res2 = KirinukunDetect.detect(imageData, {...opts, keepLabels: true});
+ *   const imageDataOfBox0 = KirinukunDetect.crop(res2, 0, {fill: 'alpha'});
+ *
+ *   const opts = KirinukunDetect.tuneToCount(imageData, 4);  // 枚数から設定を逆算
+ *   if (opts) res = KirinukunDetect.detect(imageData, opts);
+ */
+window.KirinukunDetect = (function () {
+  'use strict';
+
+  /* 背景色を推定する。四辺の画素の最頻色。 */
+  function estimateBackground(img) {
+    const { width: w, height: h, data: d } = img;
+    const bins = new Map();
+    const put = (i) => {
+      if (d[i + 3] < 128) return;
+      const k = ((d[i] >> 3) << 10) | ((d[i + 1] >> 3) << 5) | (d[i + 2] >> 3);
+      const e = bins.get(k);
+      if (e) { e.n++; e.r += d[i]; e.g += d[i + 1]; e.b += d[i + 2]; }
+      else bins.set(k, { n: 1, r: d[i], g: d[i + 1], b: d[i + 2] });
+    };
+    for (let x = 0; x < w; x++) { put(x * 4); put(((h - 1) * w + x) * 4); }
+    for (let y = 0; y < h; y++) { put(y * w * 4); put((y * w + w - 1) * 4); }
+    let best = null;
+    for (const e of bins.values()) if (!best || e.n > best.n) best = e;
+    if (!best) return { r: 255, g: 255, b: 255 };
+    return {
+      r: Math.round(best.r / best.n),
+      g: Math.round(best.g / best.n),
+      b: Math.round(best.b / best.n)
+    };
+  }
+
+  /* 前景マスク。透過画像ならアルファ、それ以外は背景色との距離。 */
+  function buildMask(img, bg, threshold) {
+    const { width: w, height: h, data: d } = img;
+    const n = w * h, mask = new Uint8Array(n);
+    let translucent = 0;
+    for (let i = 0; i < n; i++) if (d[i * 4 + 3] < 250) translucent++;
+    const useAlpha = translucent > n * 0.02;
+    const t2 = threshold * threshold;
+    for (let i = 0; i < n; i++) {
+      const p = i * 4;
+      if (d[p + 3] < 128) { mask[i] = 0; continue; }
+      if (useAlpha) { mask[i] = 1; continue; }
+      const dr = d[p] - bg.r, dg = d[p + 1] - bg.g, db = d[p + 2] - bg.b;
+      mask[i] = (dr * dr + dg * dg + db * db) > t2 ? 1 : 0;
+    }
+    return mask;
+  }
+
+  /* 矩形膨張（横→縦のスライディング窓）。ラベリング用の一時マスク。 */
+  function dilate(mask, w, h, r) {
+    if (r <= 0) return mask;
+    const a = new Uint8Array(w * h), b = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const row = y * w; let c = 0;
+      for (let x = 0; x < Math.min(r, w); x++) c += mask[row + x];
+      for (let x = 0; x < w; x++) {
+        if (x + r < w) c += mask[row + x + r];
+        if (x - r - 1 >= 0) c -= mask[row + x - r - 1];
+        a[row + x] = c > 0 ? 1 : 0;
+      }
+    }
+    for (let x = 0; x < w; x++) {
+      let c = 0;
+      for (let y = 0; y < Math.min(r, h); y++) c += a[y * w + x];
+      for (let y = 0; y < h; y++) {
+        if (y + r < h) c += a[(y + r) * w + x];
+        if (y - r - 1 >= 0) c -= a[(y - r - 1) * w + x];
+        b[y * w + x] = c > 0 ? 1 : 0;
+      }
+    }
+    return b;
+  }
+
+  /* 8近傍のラベリング（再帰なしBFS） */
+  function labelComponents(mask, w, h) {
+    const labels = new Int32Array(w * h), queue = new Int32Array(w * h);
+    let next = 0;
+    for (let s = 0; s < w * h; s++) {
+      if (!mask[s] || labels[s]) continue;
+      next++;
+      let head = 0, tail = 0;
+      queue[tail++] = s; labels[s] = next;
+      while (head < tail) {
+        const i = queue[head++], x = i % w, y = (i / w) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          const ny = y + dy; if (ny < 0 || ny >= h) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx; if (nx < 0 || nx >= w) continue;
+            const j = ny * w + nx;
+            if (mask[j] && !labels[j]) { labels[j] = next; queue[tail++] = j; }
+          }
+        }
+      }
+    }
+    return { labels, count: next };
+  }
+
+  /* 他の枠に完全に入っている枠を落とす */
+  function dropNested(boxes) {
+    const t = 2, size = b => b.w * b.h;
+    return boxes.filter(b => !boxes.some(o =>
+      o !== b && size(o) > size(b) &&
+      b.x >= o.x - t && b.y >= o.y - t &&
+      b.x + b.w <= o.x + o.w + t && b.y + b.h <= o.y + o.h + t
+    ));
+  }
+
+  /* 読み順（上→下、左→右）に並べ替える */
+  function sortReadingOrder(boxes) {
+    if (!boxes.length) return boxes;
+    const hs = boxes.map(b => b.h).sort((a, b) => a - b);
+    const tol = Math.max(8, hs[hs.length >> 1] * 0.5);
+    const sorted = [...boxes].sort((a, b) => a.y - b.y);
+    const rows = []; let row = [sorted[0]], base = sorted[0].y;
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].y - base > tol) { rows.push(row); row = []; base = sorted[i].y; }
+      row.push(sorted[i]);
+    }
+    rows.push(row);
+    return rows.flatMap(r => r.sort((a, b) => a.x - b.x));
+  }
+
+  const DEFAULTS = {
+    threshold: 28,      // 背景色からこの距離以上離れた画素を「絵」とみなす
+    radius: 3,          // 離れた部品を同じ絵として拾う距離(px)
+    minSide: 12,        // 枠の最小の一辺(px)
+    minArea: 80,        // 前景画素数の下限
+    maxAreaRatio: 0.9,  // 画像全体に対する枠の面積上限（外枠よけ）
+    minFill: 0,         // 枠に対する前景の占有率の下限（枠線・罫線よけ）
+    minColors: 0,       // 使用色数の下限（文字よけ / 0で無効）
+    dropNested: false,  // 他の枠に入っている枠を捨てる
+    padding: 0,         // 枠に足す余白(px)
+    keepLabels: false   // true にすると crop() が使える（ラベル地図を保持）
+  };
+
+  const PRESET = {
+    // 均一背景に絵が並んだシート
+    sheet:  { threshold: 28, radius: 3, minSide: 12, minArea: 80,
+              maxAreaRatio: 0.9, minFill: 0, minColors: 0, dropNested: false, padding: 2 },
+    // 文字や枠線が混ざったデザイン資料
+    design: { threshold: 28, radius: 8, minSide: 60, minArea: 6000,
+              maxAreaRatio: 0.45, minFill: 0.12, minColors: 26, dropNested: true, padding: 2 }
+  };
+
+  /* 重い処理（マスク作成〜ラベリング〜集計）。しきい値と連結半径だけに依存する。 */
+  function analyze(img, threshold, radius, collectColors) {
+    const { width: w, height: h, data: d } = img;
+    const bg = estimateBackground(img);
+    const mask = buildMask(img, bg, threshold);
+    const { labels, count } = labelComponents(dilate(mask, w, h, radius), w, h);
+
+    // bboxは膨張前の元マスクだけで測る（膨張分で枠を太らせない）
+    const comps = Array.from({ length: count + 1 },
+      () => ({ x0: 1e9, y0: 1e9, x1: -1, y1: -1, area: 0, colors: collectColors ? new Set() : null }));
+    for (let i = 0; i < w * h; i++) {
+      if (!mask[i]) continue;
+      const l = labels[i]; if (!l) continue;
+      const a = comps[l], x = i % w, y = (i / w) | 0, p = i * 4;
+      if (x < a.x0) a.x0 = x;
+      if (x > a.x1) a.x1 = x;
+      if (y < a.y0) a.y0 = y;
+      if (y > a.y1) a.y1 = y;
+      a.area++;
+      if (collectColors && a.colors.size < 80)
+        a.colors.add(((d[p] >> 4) << 8) | ((d[p + 1] >> 4) << 4) | (d[p + 2] >> 4));
+    }
+    return { comps, labels, background: bg, width: w, height: h };
+  }
+
+  /* 軽い処理。集計済みの塊を条件で絞るだけなので、何度でも呼べる。 */
+  function toBoxes(a, o) {
+    const w = a.width, h = a.height, total = w * h, pad = o.padding | 0;
+    let boxes = [];
+    for (let l = 1; l < a.comps.length; l++) {
+      const c = a.comps[l]; if (c.x1 < 0) continue;
+      const bw = c.x1 - c.x0 + 1, bh = c.y1 - c.y0 + 1, rect = bw * bh;
+      if (bw < o.minSide || bh < o.minSide || c.area < o.minArea) continue;
+      if (rect > total * o.maxAreaRatio) continue;
+      if (c.area / rect < o.minFill) continue;
+      if (o.minColors > 0 && c.colors && c.colors.size < o.minColors) continue;
+      const x = Math.max(0, c.x0 - pad), y = Math.max(0, c.y0 - pad);
+      boxes.push({
+        x, y,
+        w: Math.min(w, c.x1 + 1 + pad) - x,
+        h: Math.min(h, c.y1 + 1 + pad) - y,
+        area: c.area,
+        fill: c.area / rect
+      });
+    }
+    if (o.dropNested) boxes = dropNested(boxes);
+    return sortReadingOrder(boxes);
+  }
+
+  /*
+    塊ごとに「どの枠のものか」を決める。
+    枠に完全に収まる塊はその枠（複数なら最小の枠）のもの。
+    どの枠にも収まらない塊は -1 ＝ 所有者不明とし、写り込み消しの対象から外す。
+    これがないと、フィルタで落とした小さい塊（目・眉・ボタン等）が
+    「他の絵」と誤判定されて消えてしまう。
+  */
+  function assignOwners(a, boxes) {
+    const owner = new Int32Array(a.comps.length).fill(-1);
+    for (let l = 1; l < a.comps.length; l++) {
+      const c = a.comps[l]; if (c.x1 < 0) continue;
+      let best = -1, bestSize = Infinity;
+      for (let i = 0; i < boxes.length; i++) {
+        const b = boxes[i];
+        if (c.x0 >= b.x && c.y0 >= b.y && c.x1 < b.x + b.w && c.y1 < b.y + b.h) {
+          const s = b.w * b.h;
+          if (s < bestSize) { bestSize = s; best = i; }
+        }
+      }
+      owner[l] = best;
+    }
+    return owner;
+  }
+
+  /*
+    1枠を切り出す。detect に keepLabels:true を渡した結果が必要。
+    fill: 'alpha'（透過）/ 'bg'（背景色で塗る）/ 'none'（消さない）
+  */
+  function crop(res, index, options) {
+    if (!res.labels) throw new Error('detect に keepLabels:true を渡してください');
+    const fill = (options && options.fill) || 'alpha';
+    const b = res.boxes[index], w = res.width, src = res.image.data, bg = res.background;
+    const out = new ImageData(b.w, b.h), dst = out.data;
+    for (let y = 0; y < b.h; y++) {
+      for (let x = 0; x < b.w; x++) {
+        const si = ((b.y + y) * w + (b.x + x)) * 4, di = (y * b.w + x) * 4;
+        const l = res.labels[(b.y + y) * w + (b.x + x)];
+        const own = l ? res.owner[l] : -1;
+        if (fill !== 'none' && l && own >= 0 && own !== index) {
+          if (fill === 'alpha') { dst[di] = dst[di + 1] = dst[di + 2] = 0; dst[di + 3] = 0; }
+          else { dst[di] = bg.r; dst[di + 1] = bg.g; dst[di + 2] = bg.b; dst[di + 3] = 255; }
+        } else {
+          dst[di] = src[si]; dst[di + 1] = src[si + 1];
+          dst[di + 2] = src[si + 2]; dst[di + 3] = src[si + 3];
+        }
+      }
+    }
+    return out;
+  }
+
+  function detect(img, options) {
+    const o = Object.assign({}, DEFAULTS, options);
+    const a = analyze(img, o.threshold, o.radius, o.minColors > 0);
+    const boxes = toBoxes(a, o);
+    const res = { boxes, background: a.background, width: a.width, height: a.height };
+    if (o.keepLabels) {
+      res.labels = a.labels;
+      res.owner = assignOwners(a, boxes);
+      res.image = img;
+    }
+    return res;
+  }
+
+  /* 面積が中央値から大きく外れた枠 = 絵同士が接触して融合した疑い */
+  function suspects(boxes, ratio) {
+    if (boxes.length < 3) return [];
+    const areas = boxes.map(b => b.w * b.h).sort((a, b) => a - b);
+    const med = areas[areas.length >> 1];
+    return boxes.map((b, i) => i).filter(i =>
+      (boxes[i].w * boxes[i].h) / med > (ratio || 1.8));
+  }
+
+  /* 探索を実用速度にするための縮小 */
+  function downscale(img, maxSide) {
+    const s = Math.min(1, maxSide / Math.max(img.width, img.height));
+    if (s >= 1) return { img, scale: 1 };
+    const w = Math.max(1, Math.round(img.width * s));
+    const h = Math.max(1, Math.round(img.height * s));
+    const out = new ImageData(w, h), sx = img.width / w, sy = img.height / h, src = img.data;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      const x1 = Math.min(img.width, Math.ceil((x + 1) * sx));
+      const y1 = Math.min(img.height, Math.ceil((y + 1) * sy));
+      for (let yy = Math.floor(y * sy); yy < y1; yy++)
+        for (let xx = Math.floor(x * sx); xx < x1; xx++) {
+          const i = (yy * img.width + xx) * 4;
+          r += src[i]; g += src[i + 1]; b += src[i + 2]; a += src[i + 3]; n++;
+        }
+      const o = (y * w + x) * 4;
+      out.data[o] = r / n; out.data[o + 1] = g / n;
+      out.data[o + 2] = b / n; out.data[o + 3] = a / n;
+    }
+    return { img: out, scale: w / img.width };
+  }
+
+  const TUNE_THR = [16, 36, 60, 88, 116];
+  const TUNE_RAD = [1, 2, 3, 5, 9];
+  const TUNE_AREA = [0.0004, 0.0015, 0.005, 0.015, 0.04];
+  const TUNE_FILL = [0, 0.16];
+
+  /*
+    切り出したい枚数から設定を逆算する。
+    縮小版で総当たり → 枚数が合った候補を大きさの揃い方で採点 → 実寸で検証。
+    見つからなければ null（体感1〜2秒。UIは事前に「探索中」表示を）。
+  */
+  function tuneToCount(img, target) {
+    const { img: small, scale } = downscale(img, 400);
+    const totalS = small.width * small.height, totalF = img.width * img.height;
+    const cands = [];
+    for (const threshold of TUNE_THR)
+      for (const radius of TUNE_RAD) {
+        const a = analyze(small, threshold, radius, false);   // 重い処理はここだけ
+        for (const ar of TUNE_AREA)
+          for (const minFill of TUNE_FILL) {
+            const boxes = toBoxes(a, {
+              minSide: 4, minArea: Math.max(4, ar * totalS),
+              maxAreaRatio: 0.55, minFill, minColors: 0, dropNested: true, padding: 0
+            });
+            if (boxes.length !== target) continue;
+            const areas = boxes.map(b => b.w * b.h);
+            const sum = areas.reduce((x, y) => x + y, 0), mean = sum / areas.length;
+            const sd = Math.sqrt(areas.reduce((x, y) => x + (y - mean) ** 2, 0) / areas.length);
+            const uniform = 1 - Math.min(1, sd / mean);      // 同じ被写体なら大きさは揃う
+            const coverage = Math.min(1, sum / totalS);       // 拾えた面積は大きい方がよい
+            cands.push({
+              score: uniform * 2 + coverage + (1 - radius / 9) * 0.3,
+              threshold, radius, ar, minFill
+            });
+          }
+      }
+    if (!cands.length) return null;
+    cands.sort((a, b) => b.score - a.score);
+    for (const c of cands.slice(0, 6)) {
+      const opts = {
+        threshold: c.threshold,
+        radius: Math.max(1, Math.round(c.radius / scale)),
+        minSide: 6,
+        minArea: Math.round(Math.max(16, c.ar * totalF)),
+        maxAreaRatio: 0.55, minFill: c.minFill, minColors: 0,
+        dropNested: true, padding: 0
+      };
+      if (detect(img, opts).boxes.length === target) return opts;
+    }
+    return null;
+  }
+
+  return { detect, crop, tuneToCount, suspects, DEFAULTS, PRESET };
+})();
+</script>
 
 <script>
 "use strict";
@@ -350,6 +734,7 @@ $("btnRemoveFile").onclick = () => {
   files.splice(cur, 1);
   if(cur >= files.length) cur = files.length - 1;
   selRegion = -1;
+  srcData = null; // 外した画像の原寸ImageDataを抱え込まない
   if(cur >= 0) fitZoom();
   refreshAll();
 };
@@ -644,6 +1029,385 @@ document.addEventListener("keydown", e => {
     refreshRegions();
   }
 });
+
+/* ========== auto detect ========== */
+const DETECT_TIP = "検出した枠は手で直せます。うまく出ないときは対象を切り替えてください。";
+const DETECT_PRESET = {
+  /* 資料向け。文字は最小サイズ・占有率・使用色数のふるいで落ちる。
+     連結半径は「その2倍のpx以内の隙間」を橋渡しするので、既定の8だと
+     細い余白で並んだ絵が1つにまとまる。1〜2pxの継ぎ目でも分かれるよう0にする。 */
+  design: Object.assign({}, KirinukunDetect.PRESET.design, {radius: 0}),
+  /* 小さい絵・少色数のドット絵シートは資料のふるいで全部落ちるので、こちらで拾う。 */
+  sheet: KirinukunDetect.PRESET.sheet
+};
+let srcData = null; // {file, data} 原寸ImageDataは重いので直近の1枚だけ持つ
+
+/* 検出には原寸のImageDataを渡す。表示用のcanvasから取ると座標が全部ずれる。 */
+function getSourceImageData(){
+  const f = curFile();
+  if(!f) return null;
+  if(srcData && srcData.file === f) return srcData.data;
+  const c = document.createElement("canvas");
+  c.width = f.w; c.height = f.h;
+  const cctx = c.getContext("2d", {willReadFrequently: true});
+  cctx.drawImage(f.img, 0, 0);
+  let data;
+  try {
+    data = cctx.getImageData(0, 0, c.width, c.height);
+  } catch(err){
+    showDlg("切りヌくん", "この画像は読み取れないため自動検出できません。");
+    return null;
+  }
+  srcData = {file: f, data};
+  return data;
+}
+
+/*
+  端から端まで届く単色の線 (外枠・グリッドの罫線) を背景色で塗り潰す。
+  ・外枠があると背景色の推定が枠の色に引きずられ、絵と地の区別がつかなくなる
+  ・罫線は1本の巨大な塊になり、触れている絵まで巻き込んで消える
+  線が1本もなければ null を返す = 罫線なしのシートの結果は今まで通り。
+*/
+function stripRules(src){
+  const w = src.width, h = src.height, d = src.data;
+  // 背景色は画像全体の最頻色から取る。四辺だけ見ると外枠の色を拾ってしまう。
+  const step = Math.max(1, Math.round(Math.sqrt(w * h / 200000)));
+  const bins = new Map();
+  for(let y = 0; y < h; y += step){
+    for(let x = 0; x < w; x += step){
+      const p = (y * w + x) * 4;
+      if(d[p + 3] < 128) continue;
+      const k = ((d[p] >> 3) << 10) | ((d[p + 1] >> 3) << 5) | (d[p + 2] >> 3);
+      const e = bins.get(k);
+      if(e){ e.n++; e.r += d[p]; e.g += d[p + 1]; e.b += d[p + 2]; }
+      else bins.set(k, {n: 1, r: d[p], g: d[p + 1], b: d[p + 2]});
+    }
+  }
+  let bin = null;
+  for(const e of bins.values()) if(!bin || e.n > bin.n) bin = e;
+  if(!bin) return null;
+  const bg = {r: Math.round(bin.r / bin.n), g: Math.round(bin.g / bin.n), b: Math.round(bin.b / bin.n)};
+
+  const TOL = 24 * 24;
+  function near(p, r, g, b){
+    const dr = d[p] - r, dg = d[p + 1] - g, db = d[p + 2] - b;
+    return dr * dr + dg * dg + db * db <= TOL;
+  }
+  function isBg(p){ return d[p + 3] < 128 || near(p, bg.r, bg.g, bg.b); }
+
+  // まず「背景がほとんど無い行・列」を数える (ここだけ全画素を1回なめる)
+  const rowBg = new Int32Array(h), colBg = new Int32Array(w);
+  for(let y = 0; y < h; y++){
+    for(let x = 0; x < w; x++){
+      if(isBg((y * w + x) * 4)){ rowBg[y]++; colBg[x]++; }
+    }
+  }
+  // 候補だけ「ほぼ単色か」を確かめる。基準点は3か所試す。
+  // 絵が線をまたぐとその分だけ単色率が落ちる (実測で8割前後) ので、7割で線とみなす。
+  function uniform(len, at){
+    for(const ref of [0, len >> 1, len - 1]){
+      const c = at(ref);
+      let same = 0;
+      for(let j = 0; j < len; j++) if(near(at(j), d[c], d[c + 1], d[c + 2])) same++;
+      if(same >= len * 0.7) return true;
+    }
+    return false;
+  }
+  // 罫線は細い。連続して太く続くものは背景のグラデーション等なので罫線とみなさない。
+  function thinRuns(list, n){
+    const max = Math.max(4, Math.round(n * 0.03)), keep = [];
+    for(let i = 0; i < list.length; ){
+      let j = i;
+      while(j + 1 < list.length && list[j + 1] === list[j] + 1) j++;
+      if(j - i + 1 <= max) for(let k = i; k <= j; k++) keep.push(list[k]);
+      i = j + 1;
+    }
+    return keep;
+  }
+  let rows = [], cols = [];
+  for(let y = 0; y < h; y++)
+    if(rowBg[y] <= w * 0.05 && uniform(w, x => (y * w + x) * 4)) rows.push(y);
+  for(let x = 0; x < w; x++)
+    if(colBg[x] <= h * 0.05 && uniform(h, y => (y * w + x) * 4)) cols.push(x);
+  rows = thinRuns(rows, h);
+  cols = thinRuns(cols, w);
+  // 罫線のにじみ (アンチエイリアス) を巻き込む。背景ばかりの行/列に当たったら止める。
+  function grow(list, n, bgN, span){
+    const on = new Uint8Array(n);
+    list.forEach(i => on[i] = 1);
+    const out = Uint8Array.from(on);
+    for(const i of list){
+      for(const dir of [-1, 1]){
+        for(let k = 1; k <= 2; k++){
+          const j = i + dir * k;
+          if(j < 0 || j >= n || on[j] || bgN[j] >= span * 0.5) break;
+          out[j] = 1;
+        }
+      }
+    }
+    const res = [];
+    for(let i = 0; i < n; i++) if(out[i]) res.push(i);
+    return res;
+  }
+  rows = grow(rows, h, rowBg, w);
+  cols = grow(cols, w, colBg, h);
+  if(!rows.length && !cols.length) return null;
+
+  // 罫線は一番近い「罫線でない行/列」の画素で埋める。背景がグラデーションでも継ぎ目が出ない。
+  // ただし参照先が絵だったときは背景色で塗る。絵をコピーすると、
+  // 線を挟んで上下(左右)に並んだ別の絵どうしを橋渡ししてしまうため。
+  const out = new ImageData(new Uint8ClampedArray(d), w, h), o = out.data;
+  const isRow = new Uint8Array(h), isCol = new Uint8Array(w);
+  rows.forEach(y => isRow[y] = 1);
+  cols.forEach(x => isCol[x] = 1);
+  function nearest(flag, i, n){
+    for(let k = 1; k < n; k++){
+      if(i - k >= 0 && !flag[i - k]) return i - k;
+      if(i + k < n && !flag[i + k]) return i + k;
+    }
+    return -1;
+  }
+  function put(p, s){
+    if(s < 0 || !isBg(s)){ o[p] = bg.r; o[p + 1] = bg.g; o[p + 2] = bg.b; o[p + 3] = 255; }
+    else { o[p] = o[s]; o[p + 1] = o[s + 1]; o[p + 2] = o[s + 2]; o[p + 3] = o[s + 3]; }
+  }
+  rows.forEach(y => {
+    const sy = nearest(isRow, y, h);
+    for(let x = 0; x < w; x++) put((y * w + x) * 4, sy < 0 ? -1 : (sy * w + x) * 4);
+  });
+  cols.forEach(x => {
+    const sx = nearest(isCol, x, w);
+    for(let y = 0; y < h; y++) put((y * w + x) * 4, sx < 0 ? -1 : (y * w + sx) * 4);
+  });
+  // 連続した行/列を1本の線としてまとめる (マス目の割り出しに使う)
+  const runs = list => {
+    const out = [];
+    for(let i = 0; i < list.length; ){
+      let j = i;
+      while(j + 1 < list.length && list[j + 1] === list[j] + 1) j++;
+      out.push([list[i], list[j]]);
+      i = j + 1;
+    }
+    return out;
+  };
+  return {data: out, lines: rows.length + cols.length,
+          bands: {rows: runs(rows), cols: runs(cols)}};
+}
+
+/* 検出に渡すImageData。罫線シートなら罫線を消したものを返す。画像ごとに使い回す。 */
+function getDetectSource(){
+  const data = getSourceImageData();
+  if(!data) return null;
+  if(!srcData.det){
+    const s = stripRules(data);
+    srcData.det = s ? s.data : data;
+    srcData.ruled = !!s;
+    srcData.grid = s ? gridFromBands(data.width, data.height, s.bands) : null;
+  }
+  return {data: srcData.det, ruled: srcData.ruled, grid: srcData.grid};
+}
+
+function detectPutMode(){
+  return document.querySelector('input[name="detectMode"]:checked').value;
+}
+function setDetectHint(msg){ $("detectHint").textContent = msg; }
+/* 重い同期処理の前に「検出中…」を描かせる。裏に回るとrAFが止まるのでタイマーで保険をかける。 */
+function letPaint(){
+  return new Promise(r => {
+    requestAnimationFrame(() => setTimeout(r, 0));
+    setTimeout(r, 100);
+  });
+}
+const DETECT_BTN = {
+  detect: ["btnDetect",      "自動検出",           "検出中…"],
+  tune:   ["btnDetectCount", "この枚数に合わせる", "探索中…"],
+  cell:   ["btnGridDetect",  "マス目ごとに検出",   "検出中…"]
+};
+function setDetectBusy(busy, which){
+  for(const k in DETECT_BTN){
+    const b = DETECT_BTN[k];
+    $(b[0]).disabled = busy;
+    $(b[0]).textContent = (busy && which === k) ? b[2] : b[1];
+  }
+}
+
+/* 検出結果を選択範囲に流し込む。pushUndoは1回だけ = Undo 1回で検出前に戻る。 */
+function applyDetected(f, boxes, ruled){
+  if(curFile() !== f){
+    setDetectHint("画像が切り替わったため中止しました。");
+    return;
+  }
+  const add = detectPutMode() === "add";
+  const base = add ? f.regions.length : 0;
+  pushUndo();
+  const regions = boxes.map(b => ({x: b.x, y: b.y, w: b.w, h: b.h}));
+  f.regions = add ? f.regions.concat(regions) : regions;
+  selRegion = -1;
+  refreshRegions();
+  // 面積が中央から大きく外れた枠 = 絵同士が接触して1つにまとまっている疑い
+  const sus = KirinukunDetect.suspects(boxes).map(i => base + i + 1);
+  const how = ruled === "cell" ? "罫線のマス目ごとに" : (ruled ? "罫線を除いて" : "");
+  setDetectHint(how + boxes.length + "個の枠を検出しました。" +
+    (sus.length ? " 枠 " + sus.join(", ") + " は2つ以上の絵が入っているかもしれません。" : ""));
+}
+function putDetected(f, boxes, ruled){
+  if(curFile() !== f){
+    setDetectHint("画像が切り替わったため中止しました。");
+    return;
+  }
+  if(!boxes.length){
+    // 0枠のときは既存の選択に手を触れない
+    setDetectHint("枠が見つかりませんでした。選択範囲はそのままです。");
+    showDlg("切りヌくん", "枠が見つかりませんでした。<br>背景が均一な画像かご確認ください。枚数を指定した［この枚数に合わせる］もお試しください。");
+    return;
+  }
+  if(detectPutMode() === "replace" && f.regions.length){
+    showDlg("確認", "今ある選択範囲 (" + f.regions.length + "個) を消して検出結果 (" + boxes.length + "個) で置き換えます。<br>よろしいですか?",
+      [{label:"はい", onclick: () => applyDetected(f, boxes, ruled)}, {label:"キャンセル"}]);
+  } else applyDetected(f, boxes, ruled);
+}
+
+/* マス目の中だけを見て、絵の形に合わせた枠を1マス1個作る。
+   マスの外を一切見ないので、罫線や隣の絵とつながっていても影響を受けない。 */
+const CELL_OPTS = {threshold: 28, radius: 3, minSide: 2, minArea: 12,
+                   maxAreaRatio: 1, minFill: 0, minColors: 0, dropNested: false, padding: 0};
+function subImageData(src, x, y, w, h){
+  const out = new ImageData(w, h), s = src.data, o = out.data;
+  for(let j = 0; j < h; j++){
+    const p = ((y + j) * src.width + x) * 4;
+    o.set(s.subarray(p, p + w * 4), j * w * 4);
+  }
+  return out;
+}
+/* 罫線の位置からマス目の範囲を割り出す。格子になっていなければ null。 */
+function gridFromBands(w, h, bands){
+  const ranges = (list, size) => {
+    const out = [];
+    let prev = 0;
+    list.forEach(b => { if(b[0] - prev >= 8) out.push([prev, b[0]]); prev = b[1] + 1; });
+    if(size - prev >= 8) out.push([prev, size]);
+    return out;
+  };
+  const rows = ranges(bands.rows, h), cols = ranges(bands.cols, w);
+  if(rows.length * cols.length < 4) return null;   // 線1本だけ等は格子とみなさない
+  return {rows, cols};
+}
+function uniformRanges(size, n){
+  const out = [];
+  for(let i = 0; i < n; i++) out.push([Math.round(i * size / n), Math.round((i + 1) * size / n)]);
+  return out;
+}
+function detectInCells(data, yRanges, xRanges, margin){
+  const W = data.width, H = data.height;
+  const boxes = [];
+  for(const yr of yRanges){
+    for(const xr of xRanges){
+      // マスの境界に乗った罫線を見ないよう、少し内側から見る
+      const inset = Math.max(2, Math.round(Math.min(xr[1] - xr[0], yr[1] - yr[0]) * 0.015)) + margin;
+      const x0 = xr[0] + inset, y0 = yr[0] + inset;
+      const x1 = xr[1] - inset, y1 = yr[1] - inset;
+      if(x1 - x0 < 4 || y1 - y0 < 4) continue;
+      const found = KirinukunDetect.detect(subImageData(data, x0, y0, x1 - x0, y1 - y0), CELL_OPTS).boxes;
+      if(!found.length) continue;   // 空のマスには枠を作らない
+      // ゴミを落としてから、残りをまとめて1つの枠にする
+      const big = found.reduce((m, b) => Math.max(m, b.w * b.h), 0);
+      let ax = 1e9, ay = 1e9, bx = -1, by = -1;
+      found.forEach(b => {
+        if(b.w * b.h < big * 0.02) return;
+        ax = Math.min(ax, b.x); ay = Math.min(ay, b.y);
+        bx = Math.max(bx, b.x + b.w); by = Math.max(by, b.y + b.h);
+      });
+      const px = Math.max(0, x0 + ax - 2), py = Math.max(0, y0 + ay - 2);
+      boxes.push({x: px, y: py,
+                  w: Math.min(W, x0 + bx + 2) - px,
+                  h: Math.min(H, y0 + by + 2) - py});
+    }
+  }
+  return boxes;
+}
+
+$("btnGridDetect").onclick = async () => {
+  const f = curFile();
+  if(!f) return;
+  const rows = Math.max(1, +$("numRows").value || 1);
+  const cols = Math.max(1, +$("numCols").value || 1);
+  const margin = Math.max(0, +$("numMargin").value || 0);
+  setDetectBusy(true, "cell");
+  setDetectHint("マス目ごとに検出中…");
+  await letPaint();
+  let boxes = null, ruled = false;
+  try {
+    const src = getDetectSource();
+    if(src){
+      ruled = src.ruled;
+      boxes = detectInCells(src.data, uniformRanges(f.h, rows), uniformRanges(f.w, cols), margin);
+    }
+  } catch(err){
+    showDlg("切りヌくん", "自動検出に失敗しました。<br>" + err.message);
+  } finally {
+    setDetectBusy(false);
+  }
+  if(boxes) putDetected(f, boxes, ruled);
+  else setDetectHint(DETECT_TIP);
+};
+
+$("btnDetect").onclick = async () => {
+  const f = curFile();
+  if(!f) return;
+  setDetectBusy(true, "detect");
+  setDetectHint("検出中…");
+  await letPaint();
+  let boxes = null, ruled = false, byCell = false;
+  try {
+    const src = getDetectSource();
+    if(src){
+      ruled = src.ruled;
+      const mode = $("selDetectPreset").value;
+      // 罫線が格子になっているシートは、マス目の中だけを見た方が確実に分かれる
+      if(mode === "sheet" && src.grid){
+        byCell = true;
+        boxes = detectInCells(src.data, src.grid.rows, src.grid.cols, 0);
+      } else {
+        boxes = KirinukunDetect.detect(src.data, DETECT_PRESET[mode]).boxes;
+      }
+    }
+  } catch(err){
+    showDlg("切りヌくん", "自動検出に失敗しました。<br>" + err.message);
+  } finally {
+    setDetectBusy(false);
+  }
+  if(boxes) putDetected(f, boxes, byCell ? "cell" : ruled);
+  else setDetectHint(DETECT_TIP);
+};
+
+$("btnDetectCount").onclick = async () => {
+  const f = curFile();
+  if(!f) return;
+  const n = Math.max(1, Math.round(+$("numDetectCount").value || 1));
+  // tuneToCountは同期のまま数秒ブロックするので、先に「探索中…」を描かせる
+  setDetectBusy(true, "tune");
+  setDetectHint("探索中… (数秒かかります)");
+  await letPaint();
+  let boxes = null, ruled = false, notFound = false;
+  try {
+    const src = getDetectSource();
+    if(src){
+      ruled = src.ruled;
+      const opts = KirinukunDetect.tuneToCount(src.data, n);
+      if(opts) boxes = KirinukunDetect.detect(src.data, opts).boxes;
+      else notFound = true;
+    }
+  } catch(err){
+    showDlg("切りヌくん", "自動検出に失敗しました。<br>" + err.message);
+  } finally {
+    setDetectBusy(false);
+  }
+  if(boxes) putDetected(f, boxes, ruled);
+  else if(notFound){
+    setDetectHint(n + "個になる設定が見つかりませんでした。");
+    showDlg("切りヌくん", n + " 個の枠になる設定が見つかりませんでした。<br>枚数を変えるか、［自動検出］で出た枠を手で調整してください。");
+  } else setDetectHint(DETECT_TIP);
+};
 
 /* ========== grid split ========== */
 $("btnGrid").onclick = () => {
@@ -979,8 +1743,21 @@ $("btnHelp").onclick = () => {
     "・Shift+ドラッグ → 画面パン / ホイール → ズーム<br>",
     "・Delete → 選択中の範囲を削除 / Ctrl+Z → 元に戻す<br>",
     "・矢印キー → 1px移動 (Shiftで10px)<br><br>",
-    "<b>表情集の場合</b><br>",
-    "グリッド分割で一括生成 → 各枠を微調整すると速いです。<br><br>",
+    "<b>自動検出</b><br>",
+    "［自動検出］で絵を探して枠を作ります。出た枠はそのまま手で直せます。<br>",
+    "・対象「資料」… 文字を除いて絵だけを拾います (既定)<br>",
+    "・対象「素材シート」… 小さい絵やドット絵向け。罫線で区切られたシートは、",
+    "罫線からマス目を割り出して1マス1枠にします<br>",
+    "・思った数にならないときは、枚数を入れて［この枚数に合わせる］(数秒かかります)<br>",
+    "・結果は「置き換える」「追加する」を選べます<br><br>",
+    "<b>マス目状のシート (表情集など)</b><br>",
+    "・［マス目ごとに検出］… 縦×横の各マスの中だけを見て、絵の形に合わせた枠を作ります。",
+    "罫線や隣の絵に影響されず、空のマスは飛ばします<br>",
+    "・［グリッドで分割する］… マスの形そのままで等分します<br><br>",
+    "<b>うまくいかないとき</b><br>",
+    "・絵どうしが接していると1つの枠になります。枠を消して手で描き直してください<br>",
+    "・枠を全部消すならツールバーの［この画像の選択を消去］(Ctrl+Zで戻せます)<br>",
+    "・検出は表示中の画像だけが対象です<br><br>",
     "<b>書き出し</b><br>",
     "選択範囲は番号順に連番PNGとしてZIPにまとまります。<br><br>",
     "Presented by:<a href='https://ichinoji-maruichi.github.io/' target='_blank' rel='noopener'>マルイチソフト</a>"
