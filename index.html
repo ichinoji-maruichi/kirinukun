@@ -301,6 +301,7 @@
       <fieldset>
         <legend>選択範囲 (<span id="regionCount">0</span>)</legend>
         <div class="thumbgrid" id="thumbGrid"></div>
+        <div class="hint">サムネイルをダブルクリックすると、その1枚だけPNGで保存します。</div>
       </fieldset>
 
       <div class="exportbtns">
@@ -1575,6 +1576,10 @@ function refreshThumbs(){
   const n = f ? f.regions.length : 0;
   $("regionCount").textContent = n;
   $("stCount").textContent = "選択 " + n;
+  // 1枚だけならZIPにせずPNGで保存するので、表記も合わせる
+  const total = files.reduce((a, g) => a + g.regions.length, 0);
+  $("btnExportCur").textContent = "この画像を書き出し (" + (n === 1 ? "PNG" : "ZIP") + ")";
+  $("btnExportAll").textContent = "全画像を書き出し (" + (total === 1 ? "PNG" : "ZIP") + ")";
   if(!f) return;
   f.regions.forEach((r, i) => {
     const cell = document.createElement("div");
@@ -1605,6 +1610,8 @@ function refreshThumbs(){
       refreshRegions();
     };
     cell.onclick = () => { selRegion = i; render(); refreshThumbs(); };
+    cell.ondblclick = () => { selRegion = i; render(); saveRegionPng(f, i); };
+    cell.title = "ダブルクリックでこの1枚だけPNG保存";
     cell.appendChild(tc); cell.appendChild(num); cell.appendChild(del);
     grid.appendChild(cell);
   });
@@ -1979,7 +1986,7 @@ async function exportFiles(targets, zipName){
       const blob = await regionToBlob(f, r, st);
       if(!blob) continue;
       const data = new Uint8Array(await blob.arrayBuffer());
-      entries.push({name: prefix + "_" + pad3(num) + ".png", data});
+      entries.push({name: prefix + "_" + pad3(num) + ".png", data, blob});
       num++;
     }
   }
@@ -1987,15 +1994,38 @@ async function exportFiles(targets, zipName){
     showDlg("切りヌくん", "書き出す選択範囲がありません。<br>画像上をドラッグして範囲を作ってください。");
     return;
   }
-  const zip = buildZip(entries);
+  // 1枚だけならZIPにせずPNGのまま保存する
+  if(entries.length === 1){
+    saveBlob(entries[0].blob, entries[0].name);
+    showDlg("書き出し完了", "「" + entries[0].name + "」に書き出しました。");
+    return;
+  }
+  saveBlob(buildZip(entries), zipName);
+  showDlg("書き出し完了", entries.length + " 枚を「" + zipName + "」に書き出しました。");
+}
+
+function saveBlob(blob, name){
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(zip);
-  a.download = zipName;
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-  showDlg("書き出し完了", entries.length + " 枚を「" + zipName + "」に書き出しました。");
+}
+
+/* 選択範囲を1つだけPNGで保存する (サムネイルのダブルクリック) */
+async function saveRegionPng(f, i){
+  const r = f.regions[i];
+  if(!r) return;
+  const blob = await regionToBlob(f, r, getSettings());
+  if(!blob) return;
+  saveBlob(blob, regionFileName(i));
+}
+function regionFileName(i){
+  const prefix = ($("txtPrefix").value || "img").trim() || "img";
+  const start = Math.max(0, Math.round(+$("numStart").value || 1));
+  return prefix + "_" + pad3(start + i) + ".png";
 }
 
 $("btnExportCur").onclick = () => {
@@ -2044,7 +2074,9 @@ $("btnHelp").onclick = () => {
     "緑背景のシートのように、絵の中に背景と同じ色が無い画像でだけ使ってください<br>",
     "・余白も透過になります (「余白の色」の指定より優先)<br><br>",
     "<b>書き出し</b><br>",
-    "選択範囲は番号順に連番PNGとしてZIPにまとまります。<br><br>",
+    "選択範囲は番号順に連番PNGとしてZIPにまとまります。<br>",
+    "・選択範囲が1つだけのときは、ZIPにせずPNGのまま保存します<br>",
+    "・サムネイルをダブルクリックすると、その1枚だけPNGで保存します<br><br>",
     "Presented by:<a href='https://ichinoji-maruichi.github.io/' target='_blank' rel='noopener'>マルイチソフト</a>"
   ].join(""));
 };
