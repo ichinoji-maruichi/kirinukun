@@ -157,7 +157,7 @@
 </head>
 <body>
 <div class="win">
-  <div class="titlebar"><span class="ticon">✂</span><span>素材切り出しツール -切りヌくん- v1.1</span></div>
+  <div class="titlebar"><span class="ticon">✂</span><span>素材切り出しツール -切りヌくん- v1.2</span></div>
 
   <div class="toolbar">
     <button class="btn95" id="btnOpen">画像を開く...</button>
@@ -221,6 +221,22 @@
             <option value="#000000">黒</option>
             <option value="transparent">透過</option>
           </select>
+        </div>
+        <div class="row">
+          <label><input type="checkbox" id="chkAlpha"> 背景を透過する</label>
+        </div>
+        <div class="row" id="rowAlphaTol" style="display:none;">
+          <label>背景の許容範囲</label>
+          <input type="number" id="numAlphaTol" value="28" min="0" max="150" step="2">
+        </div>
+        <div class="row" id="rowAlphaHoles" style="display:none;">
+          <label><input type="checkbox" id="chkAlphaHoles"> 囲まれた背景も抜く</label>
+        </div>
+        <div class="hint" id="alphaHint" style="display:none;">
+          背景が均一な画像向け。仕上がりは画面上の枠内に市松模様で表示されます (ズームで拡大確認できます)。<br>
+          背景が残るときは許容範囲を上げてください。上げすぎると絵まで削れます。<br>
+          髪と体の隙間などに残る場合は「囲まれた背景も抜く」を。絵の中に背景と同じ色がある画像では使わないでください。<br>
+          余白も透過になります。
         </div>
       </fieldset>
 
@@ -1068,9 +1084,9 @@ function getSourceImageData(){
   ・罫線は1本の巨大な塊になり、触れている絵まで巻き込んで消える
   線が1本もなければ null を返す = 罫線なしのシートの結果は今まで通り。
 */
-function stripRules(src){
+/* 画像全体の最頻色 = 背景色。四辺だけ見ると外枠の色を拾ってしまうので全体を間引いて数える。 */
+function modeColor(src){
   const w = src.width, h = src.height, d = src.data;
-  // 背景色は画像全体の最頻色から取る。四辺だけ見ると外枠の色を拾ってしまう。
   const step = Math.max(1, Math.round(Math.sqrt(w * h / 200000)));
   const bins = new Map();
   for(let y = 0; y < h; y += step){
@@ -1085,8 +1101,13 @@ function stripRules(src){
   }
   let bin = null;
   for(const e of bins.values()) if(!bin || e.n > bin.n) bin = e;
-  if(!bin) return null;
-  const bg = {r: Math.round(bin.r / bin.n), g: Math.round(bin.g / bin.n), b: Math.round(bin.b / bin.n)};
+  return bin ? {r: Math.round(bin.r / bin.n), g: Math.round(bin.g / bin.n), b: Math.round(bin.b / bin.n)} : null;
+}
+
+function stripRules(src){
+  const w = src.width, h = src.height, d = src.data;
+  const bg = modeColor(src);
+  if(!bg) return null;
 
   const TOL = 24 * 24;
   function near(p, r, g, b){
@@ -1446,6 +1467,17 @@ function resizeCanvas(){
   }
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
+let checkerPat = null;
+function checkerPattern(){
+  if(checkerPat) return checkerPat;
+  const c = document.createElement("canvas");
+  c.width = c.height = 16;
+  const x = c.getContext("2d");
+  x.fillStyle = "#ffffff"; x.fillRect(0, 0, 16, 16);
+  x.fillStyle = "#c0c0c0"; x.fillRect(0, 0, 8, 8); x.fillRect(8, 8, 8, 8);
+  checkerPat = ctx.createPattern(c, "repeat");
+  return checkerPat;
+}
 function render(){
   resizeCanvas();
   const w = wrap.clientWidth, h = wrap.clientHeight;
@@ -1461,12 +1493,24 @@ function render(){
   ctx.restore();
 
   // regions in screen space for crisp 1px lines
+  const preview = $("chkAlpha").checked;
   f.regions.forEach((r, i) => {
     const x = panX + r.x * zoom, y = panY + r.y * zoom;
     const rw = r.w * zoom, rh = r.h * zoom;
     const sel = i === selRegion;
-    ctx.fillStyle = sel ? "rgba(0,0,255,0.12)" : "rgba(0,128,255,0.08)";
-    ctx.fillRect(x, y, rw, rh);
+    // 背景を透過するときは、枠の中だけ仕上がりを市松模様の上に描く
+    const cut = preview ? cutoutCanvas(f, r) : null;
+    if(cut){
+      ctx.save();
+      ctx.fillStyle = checkerPattern();
+      ctx.fillRect(x, y, rw, rh);
+      ctx.imageSmoothingEnabled = zoom < 1;
+      ctx.drawImage(cut, x, y, rw, rh);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = sel ? "rgba(0,0,255,0.12)" : "rgba(0,128,255,0.08)";
+      ctx.fillRect(x, y, rw, rh);
+    }
     ctx.lineWidth = sel ? 2 : 1;
     ctx.strokeStyle = sel ? "#0000ff" : "#0080ff";
     ctx.strokeRect(x + 0.5, y + 0.5, rw, rh);
@@ -1542,7 +1586,10 @@ function refreshThumbs(){
     const sc = Math.min(S / r.w, S / r.h);
     const dw = r.w * sc, dh = r.h * sc;
     tctx.imageSmoothingQuality = "medium";
-    tctx.drawImage(f.img, r.x, r.y, r.w, r.h, (S - dw) / 2, (S - dh) / 2, dw, dh);
+    // 背景を透過するときは仕上がりをそのまま出す (セルの市松模様が透けて見える)
+    const cut = $("chkAlpha").checked ? cutoutCanvas(f, r, S * 2) : null;
+    if(cut) tctx.drawImage(cut, 0, 0, cut.width, cut.height, (S - dw) / 2, (S - dh) / 2, dw, dh);
+    else tctx.drawImage(f.img, r.x, r.y, r.w, r.h, (S - dw) / 2, (S - dh) / 2, dw, dh);
     const num = document.createElement("span");
     num.className = "num";
     num.textContent = i + 1;
@@ -1590,13 +1637,241 @@ function getSettings(){
     size = v === "custom" ? (+$("numCustomSize").value || 1024) : +v;
     size = Math.min(4096, Math.max(16, Math.round(size)));
   }
-  return { size, shape: $("selShape").value, padColor: $("selPadColor").value };
+  return { size, shape: $("selShape").value, padColor: $("selPadColor").value,
+           alpha: $("chkAlpha").checked };
 }
+
+/* ========== 背景の透過 ========== */
+/*
+  背景色との距離からアルファを作る。値は実画像で測って決めた。
+  ・塗り広げ(cutTF() = 出力設定の「背景の許容範囲」)と、縁をなめらかにする範囲(CUT_EXPAND=3px)を分ける。
+    ひとつの広いしきい値でやると、薄い色の輪郭線を突き抜けて絵の中身まで塗ってしまう
+    (白背景に薄いグレーの線で描かれた絵などが丸ごと消える)
+  ・画像の外周から塗り広げる。色が一致する画素を全部抜くと、絵の中の同系色に穴が開く
+  ・外から届かない「閉じた背景」(マフラーと体の隙間など) も抜くが、条件は厳しくする。
+    背景色が絵の中にも普通に出てくる画像 (白背景に白い部分がある絵など) では、
+    絵の内側が穴だらけになるため、「背景色ほぼそのままの色 (距離16以内)」の塊が
+    「2個以下」かつ「合計が枠の2%以下」のときだけ抜く。実測では本物の隙間は0〜2個、
+    白背景の絵では7〜40個できるので、これで区別できる
+  ・縁は背景色の寄与を引き算し、さらに2px以内は背景色の色かぶりを抑える (緑のフチ対策)
+*/
+const CUT_TF_DEFAULT = 28, CUT_EXPAND = 3, CUT_BAND = 2;
+/* 「背景の許容範囲」= 背景色からどこまでを背景とみなすか。画像によって最適値が違う。 */
+function cutTF(){
+  const v = +$("numAlphaTol").value;
+  return Math.max(0, Math.min(150, isNaN(v) ? CUT_TF_DEFAULT : v));
+}
+const CUT_HOLE_MIN = 12, CUT_HOLE_D = 16, CUT_HOLE_MAX = 0.02, CUT_HOLE_MAXN = 2;
+let cutSrc = null;   // {file, data, bg, cache} 透過用に直近の1枚だけ持つ
+
+function cutContext(f){
+  if(cutSrc && cutSrc.file === f) return cutSrc;
+  let data = (srcData && srcData.file === f) ? srcData.data : null;
+  if(!data){
+    const c = document.createElement("canvas");
+    c.width = f.w; c.height = f.h;
+    const cx = c.getContext("2d", {willReadFrequently: true});
+    cx.drawImage(f.img, 0, 0);
+    try { data = cx.getImageData(0, 0, c.width, c.height); }
+    catch(err){ return null; }
+  }
+  cutSrc = {file: f, data, bg: modeColor(data) || {r: 255, g: 255, b: 255}, cache: new Map()};
+  return cutSrc;
+}
+
+/*
+  選択範囲を背景透過した canvas で返す。取れないときは null。
+  maxSide を渡すと間引いて粗く作る (サムネイルのプレビュー用。書き出しは原寸のまま)。
+*/
+function cutoutCanvas(f, r, maxSide){
+  const cs = cutContext(f);
+  if(!cs) return null;
+  const TF = cutTF();
+  const allHoles = $("chkAlphaHoles").checked;
+  const key = [Math.round(r.x), Math.round(r.y), Math.round(r.w), Math.round(r.h),
+               maxSide || 0, TF, allHoles ? 1 : 0].join(",");
+  if(cs.cache.has(key)) return cs.cache.get(key);
+
+  const src = cs.data, bg = cs.bg, s = src.data;
+  const x0 = Math.max(0, Math.round(r.x)), y0 = Math.max(0, Math.round(r.y));
+  const rw = Math.min(src.width - x0, Math.round(r.w)), rh = Math.min(src.height - y0, Math.round(r.h));
+  if(rw < 1 || rh < 1) return null;
+  const step = maxSide ? Math.max(1, Math.ceil(Math.max(rw, rh) / maxSide)) : 1;
+  const w = Math.ceil(rw / step), h = Math.ceil(rh / step);
+  const cell = new Uint8ClampedArray(w * h * 4);
+  if(step === 1){
+    for(let y = 0; y < h; y++){
+      const p = ((y0 + y) * src.width + x0) * 4;
+      cell.set(s.subarray(p, p + w * 4), y * w * 4);
+    }
+  } else {
+    for(let y = 0; y < h; y++){
+      for(let x = 0; x < w; x++){
+        const p = ((y0 + y * step) * src.width + (x0 + x * step)) * 4, d = (y * w + x) * 4;
+        cell[d] = s[p]; cell[d + 1] = s[p + 1]; cell[d + 2] = s[p + 2]; cell[d + 3] = s[p + 3];
+      }
+    }
+  }
+  // 背景色からの距離。何度も使うので先に全画素ぶん出しておく。
+  const D = new Float32Array(w * h);
+  for(let i = 0; i < w * h; i++){
+    const p = i * 4, dr = cell[p] - bg.r, dg = cell[p + 1] - bg.g, db = cell[p + 2] - bg.b;
+    D[i] = Math.sqrt(dr * dr + dg * dg + db * db);
+  }
+  // 外周から背景を塗り広げる。「本当に背景」と言える狭いしきい値だけを通す。
+  const out = new Uint8Array(w * h), q = new Int32Array(w * h);
+  let qt = 0, qh = 0;
+  const push = i => { if(!out[i] && D[i] <= TF){ out[i] = 1; q[qt++] = i; } };
+  const drain = () => {
+    for(; qh < qt; qh++){
+      const i = q[qh], x = i % w, y = (i / w) | 0;
+      if(x > 0) push(i - 1);
+      if(x < w - 1) push(i + 1);
+      if(y > 0) push(i - w);
+      if(y < h - 1) push(i + w);
+    }
+  };
+  for(let x = 0; x < w; x++){ push(x); push((h - 1) * w + x); }
+  for(let y = 0; y < h; y++){ push(y * w); push(y * w + w - 1); }
+  drain();
+  // 外から届かない背景の塊 (＝絵に囲まれた背景) を集める。小さすぎるものは絵の一部とみなす。
+  // 「囲まれた背景も抜く」がONなら許容範囲まるごとを対象にして、見つかった分は全部抜く。
+  const holeD = allHoles ? TF : CUT_HOLE_D;
+  const seen = new Uint8Array(w * h), st = new Int32Array(w * h);
+  const holes = [];
+  let holeTotal = 0;
+  for(let s0 = 0; s0 < w * h; s0++){
+    if(out[s0] || seen[s0] || D[s0] > holeD) continue;
+    let sp = 0, cnt = 0;
+    const comp = [];
+    st[sp++] = s0; seen[s0] = 1;
+    while(sp){
+      const i = st[--sp];
+      comp.push(i); cnt++;
+      const x = i % w, y = (i / w) | 0;
+      const t = j => { if(!seen[j] && !out[j] && D[j] <= holeD){ seen[j] = 1; st[sp++] = j; } };
+      if(x > 0) t(i - 1);
+      if(x < w - 1) t(i + 1);
+      if(y > 0) t(i - w);
+      if(y < h - 1) t(i + w);
+    }
+    if(cnt >= CUT_HOLE_MIN){ holes.push(comp); holeTotal += cnt; }
+  }
+  // OFFのときは、背景色が絵の中にも出てくる画像 (白背景に白い絵など) を壊さないよう、
+  // 数が少なく面積も小さいときだけ抜く。ONなら判定せず全部抜く。
+  if(allHoles || (holes.length <= CUT_HOLE_MAXN && holeTotal <= w * h * CUT_HOLE_MAX)){
+    holes.forEach(comp => comp.forEach(i => { if(!out[i]){ out[i] = 1; q[qt++] = i; } }));
+    drain();
+  }
+  // 背景は透過。その縁から CUT_EXPAND px ぶんを「縁」として集める。
+  // 塗り広げないので、薄い輪郭線があっても線の外側がぼけるだけで中身には届かない。
+  const A = new Uint8ClampedArray(w * h).fill(255);
+  const depth = new Int16Array(w * h).fill(-1);
+  const q2 = new Int32Array(w * h), band = [];
+  let t2 = 0, h2 = 0;
+  for(let i = 0; i < w * h; i++) if(out[i]){ A[i] = 0; depth[i] = 0; q2[t2++] = i; }
+  while(h2 < t2){
+    const i = q2[h2++], k = depth[i];
+    if(k >= CUT_EXPAND) continue;
+    const x = i % w, y = (i / w) | 0;
+    const soft = j => {
+      if(depth[j] >= 0) return;
+      depth[j] = k + 1;
+      band.push(j);
+      q2[t2++] = j;
+    };
+    if(x > 0) soft(i - 1);
+    if(x < w - 1) soft(i + 1);
+    if(y > 0) soft(i - w);
+    if(y < h - 1) soft(i + w);
+  }
+  /*
+    縁の画素は「絵の色と背景色の混ざりもの」なので、混ざり具合がそのままアルファになる。
+    アルファ = 背景色からの距離 ÷ 絵の色までの距離。
+    ・分母を固定値にすると、濃い輪郭 (背景から300以上離れる) でアルファを多く見積もり、
+      背景の色が残って縁が光る。近くの「絵の色」を実際に測って分母にする。
+    ・縁に入れる条件に距離の上限を設けてもいけない。輪郭が半分混ざった画素 (距離200超) が
+      不透明のまま灰色で残り、これも1pxの明るい線になる。上限は設けず、
+      混ざっていない画素は アルファ = 距離 ÷ 距離 = 255 で自然に不透明になる。
+  */
+  for(const j of band){
+    const x = j % w, y = (j / w) | 0;
+    let solid = 0;
+    for(let dy = -CUT_EXPAND; dy <= CUT_EXPAND; dy++){
+      for(let dx = -CUT_EXPAND; dx <= CUT_EXPAND; dx++){
+        const nx = x + dx, ny = y + dy;
+        if(nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const n = ny * w + nx;
+        if(D[n] > solid) solid = D[n];   // 近くで一番「絵らしい」色までの距離
+      }
+    }
+    if(solid < TF + 8) solid = TF + 8;
+    A[j] = Math.round(Math.min(1, D[j] / solid) * 255);
+  }
+  // 半透明の画素から CUT_BAND px 以内の不透明画素 = 背景色がかぶっている縁
+  const edge = new Uint8Array(w * h);
+  for(let y = 0; y < h; y++){
+    for(let x = 0; x < w; x++){
+      const i = y * w + x;
+      if(A[i] !== 255) continue;
+      for(let dy = -CUT_BAND; dy <= CUT_BAND && !edge[i]; dy++){
+        for(let dx = -CUT_BAND; dx <= CUT_BAND; dx++){
+          const nx = x + dx, ny = y + dy;
+          if(nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          if(A[ny * w + nx] < 255){ edge[i] = 1; break; }
+        }
+      }
+    }
+  }
+  const mx = Math.max(bg.r, bg.g, bg.b);
+  const img = new ImageData(w, h), o = img.data;
+  for(let i = 0; i < w * h; i++){
+    const p = i * 4, a = A[i];
+    if(a === 0){ o[p] = o[p + 1] = o[p + 2] = o[p + 3] = 0; continue; }
+    // 観測色 = a*本来の色 + (1-a)*背景色 を解いて背景の寄与を外す
+    const fa = a / 255;
+    let cr = (cell[p] - (1 - fa) * bg.r) / fa;
+    let cg = (cell[p + 1] - (1 - fa) * bg.g) / fa;
+    let cb = (cell[p + 2] - (1 - fa) * bg.b) / fa;
+    if(a < 255 || edge[i]){
+      if(bg.g === mx){ const l = Math.max(cr, cb); if(cg > l) cg = l; }
+      else if(bg.r === mx){ const l = Math.max(cg, cb); if(cr > l) cr = l; }
+      else { const l = Math.max(cr, cg); if(cb > l) cb = l; }
+    }
+    o[p] = cr; o[p + 1] = cg; o[p + 2] = cb; o[p + 3] = a;
+  }
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  c.getContext("2d").putImageData(img, 0, 0);
+  if(cs.cache.size > 60) cs.cache.clear();
+  cs.cache.set(key, c);
+  return c;
+}
+
+$("chkAlpha").onchange = () => {
+  const on = $("chkAlpha").checked;
+  $("alphaHint").style.display = on ? "" : "none";
+  $("rowAlphaTol").style.display = on ? "" : "none";
+  $("rowAlphaHoles").style.display = on ? "" : "none";
+  refreshThumbs();
+  render();
+};
+$("numAlphaTol").onchange = $("numAlphaTol").oninput = $("chkAlphaHoles").onchange = () => {
+  if(cutSrc) cutSrc.cache.clear();   // 設定が変わったので作り直す
+  refreshThumbs();
+  render();
+};
 
 /* ========== export ========== */
 function regionToBlob(f, r, st){
   return new Promise(resolve => {
     let sx = r.x, sy = r.y, sw = r.w, sh = r.h;
+    // 背景を透過する場合は、切り抜き済みの canvas を元画像の代わりに使う
+    let img = f.img;
+    if(st.alpha){
+      const cut = cutoutCanvas(f, r);
+      if(cut){ img = cut; sx = 0; sy = 0; sw = cut.width; sh = cut.height; }
+    }
     if(st.shape === "crop"){
       const s = Math.min(sw, sh);
       sx += (sw - s) / 2; sy += (sh - s) / 2;
@@ -1611,20 +1886,20 @@ function regionToBlob(f, r, st){
       c.width = Math.max(1, Math.round(sw * sc));
       c.height = Math.max(1, Math.round(sh * sc));
       cctx.imageSmoothingQuality = "high";
-      cctx.drawImage(f.img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+      cctx.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
     } else {
       c.width = outSize; c.height = outSize;
       cctx.imageSmoothingQuality = "high";
       if(st.shape === "pad"){
-        if(st.padColor !== "transparent"){
+        if(!st.alpha && st.padColor !== "transparent"){
           cctx.fillStyle = st.padColor;
           cctx.fillRect(0, 0, outSize, outSize);
         }
         const sc = outSize / Math.max(sw, sh);
         const dw = sw * sc, dh = sh * sc;
-        cctx.drawImage(f.img, sx, sy, sw, sh, (outSize - dw) / 2, (outSize - dh) / 2, dw, dh);
+        cctx.drawImage(img, sx, sy, sw, sh, (outSize - dw) / 2, (outSize - dh) / 2, dw, dh);
       } else { // crop
-        cctx.drawImage(f.img, sx, sy, sw, sh, 0, 0, outSize, outSize);
+        cctx.drawImage(img, sx, sy, sw, sh, 0, 0, outSize, outSize);
       }
     }
     c.toBlob(b => resolve(b), "image/png");
@@ -1758,6 +2033,16 @@ $("btnHelp").onclick = () => {
     "・絵どうしが接していると1つの枠になります。枠を消して手で描き直してください<br>",
     "・枠を全部消すならツールバーの［この画像の選択を消去］(Ctrl+Zで戻せます)<br>",
     "・検出は表示中の画像だけが対象です<br><br>",
+    "<b>背景の透過</b><br>",
+    "出力設定の［背景を透過する］で、背景を抜いた透過PNGにします。",
+    "背景が均一な画像 (緑背景のシートなど) 向けです。<br>",
+    "・仕上がりは画面上の枠の中にそのまま表示されます (市松模様=透過)。",
+    "ホイールで拡大すれば縁まで確認できます<br>",
+    "・背景が残るときは［背景の許容範囲］を上げてください。",
+    "上げすぎると絵まで削れるので、画面を見ながら調整します<br>",
+    "・髪と体の隙間など、外から届かない場所に背景が残るときは［囲まれた背景も抜く］。",
+    "緑背景のシートのように、絵の中に背景と同じ色が無い画像でだけ使ってください<br>",
+    "・余白も透過になります (「余白の色」の指定より優先)<br><br>",
     "<b>書き出し</b><br>",
     "選択範囲は番号順に連番PNGとしてZIPにまとまります。<br><br>",
     "Presented by:<a href='https://ichinoji-maruichi.github.io/' target='_blank' rel='noopener'>マルイチソフト</a>"
